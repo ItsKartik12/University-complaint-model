@@ -134,7 +134,7 @@ async function getProfile(db:D1Database,sub:string) {
 function canSeeCase(user:any,caseRow:any) {
   if(user.role==='ADMIN')return true
   if(user.role==='COMPLAINANT')return caseRow.complainant_id===user.sub
-  if(user.role==='OFFICIAL')return caseRow.assigned_officer_id===user.sub
+  if(user.role==='OFFICIAL')return caseRow.assigned_officer_id===user.sub || !caseRow.assigned_officer_id
   if(user.role==='BUREAU_OFFICER')return caseRow.assigned_bureau_id===user.bureau_id
   return false
 }
@@ -178,8 +178,9 @@ acics.post('/complaints',async c=>{
   const db=c.get('db'),user=c.get('user'),profile=await getProfile(db,user.sub)
   if(profile.role!=='COMPLAINANT')return c.json({error:'Only complainants can submit a complaint.'},403)
   let body:any;try{body=await c.req.json()}catch{return c.json({error:'A valid JSON request is required.'},400)}
-  const subject=text(body.subject,180),description=text(body.description,5000),category=text(body.category,80),officialId=text(body.institutionOfficialId,80)
-  if(subject.length<8||description.length<30||!CATEGORIES.includes(category)||!officialId)return c.json({error:'Provide a subject (at least 8 characters), a description (at least 30 characters), a category, and an institution identifier.'},400)
+  const subject=text(body.subject,180),description=text(body.description,5000),category=text(body.category,80),officialId=text(body.institutionOfficialId||body.institutionId,80)
+  if(!CATEGORIES.includes(category))return c.json({error:'Select a valid complaint category.'},400)
+  if(subject.length<8||description.length<30||!officialId)return c.json({error:'Provide a subject (at least 8 characters), a description (at least 30 characters), a category, and an institution identifier.'},400)
   const inst=await db.prepare(`SELECT id FROM acics_institutions WHERE official_id=? AND active=1`).bind(officialId).first<any>()
   if(!inst)return c.json({error:'Institution identifier was not found in the synthetic directory. Ask an administrator to add the institution.'},400)
   const complaintId=id(),number=`AC-${new Date().getUTCFullYear()}-${Math.floor(100000+Math.random()*900000)}`,now=Date.now(),bureau=category==='Regulatory compliance'?'bureau-rb':'bureau-pgrc',due=now+30*DAY
@@ -201,16 +202,92 @@ acics.get('/complaints/:id',async c=>{
 acics.patch('/complaints/:id/status',async c=>{
   const db=c.get('db'),user=c.get('user'),profile=await getProfile(db,user.sub),row=await caseRow(db,c.req.param('id'))
   if(!row)return c.json({error:'Complaint not found.'},404)
-  if(!canSeeCase(profile,row)||profile.role==='COMPLAINANT')return c.json({error:'You do not have permission to update this complaint.'},403)
+  if(!canSeeCase(profile,row))return c.json({error:'You do not have permission to update this complaint.'},403)
   let body:any;try{body=await c.req.json()}catch{return c.json({error:'A valid JSON request is required.'},400)}
   const next=text(body.status,32),remarks=text(body.remarks,1000),visibility=body.visibility==='PUBLIC'?'PUBLIC':'INTERNAL'
+  if(profile.role==='COMPLAINANT'){
+    if(row.status!=='AWAITING_INFORMATION'||next!=='UNDER_PROCESS'){
+      return c.json({error:'Complainants can only return a case from awaiting information to under process.'},403)
+    }
+  }
   if(!STATUSES.includes(next as any))return c.json({error:'Unknown case status.'},400)
   if(!(transitions[row.status]||[]).includes(next))return c.json({error:`Transition from ${row.status} to ${next} is not allowed.`},409)
+
+  let targetBureauId: string | null = null
+  if(next==='TRANSFERRED'){
+    targetBureauId = body.targetBureauId ? text(body.targetBureauId,64) : null
+    if(!targetBureauId) return c.json({error:'Target bureau is required when transferring a case.'},400)
+    const targetBureau = await db.prepare(`SELECT id, name FROM acics_bureaus WHERE id=? AND active=1`).bind(targetBureauId).first<any>()
+    if(!targetBureau) return c.json({error:'Target bureau was not found or is inactive.'},400)
+  }
+
   const now=Date.now()
-  await db.prepare(`UPDATE acics_complaints SET status=?,public_remarks=CASE WHEN ?='PUBLIC' AND ?<>'' THEN ? ELSE public_remarks END,last_action_at=?,resolved_at=CASE WHEN ?='RESOLVED' THEN ? ELSE resolved_at END,updated_at=? WHERE id=?`).bind(next,visibility,remarks,remarks,now,next,now,now,row.id).run()
+  const updatedBureau = next==='TRANSFERRED' ? targetBureauId : row.assigned_bureau_id
+  const updatedOfficer = next==='TRANSFERRED' ? null : row.assigned_officer_id
+
+  await db.prepare(`UPDATE acics_complaints SET status=?,assigned_bureau_id=?,assigned_officer_id=?,public_remarks=CASE WHEN ?='PUBLIC' AND ?<>'' THEN ? ELSE public_remarks END,last_action_at=?,resolved_at=CASE WHEN ?='RESOLVED' THEN ? WHEN ?='UNDER_PROCESS' AND resolved_at IS NOT NULL THEN NULL ELSE resolved_at END,updated_at=? WHERE id=?`).bind(next,updatedBureau,updatedOfficer,visibility,remarks,remarks,now,next,now,next,now,row.id).run()
   await db.prepare(`INSERT INTO acics_actions (id,complaint_id,actor_id,action_type,previous_value,new_value,remarks,visibility,created_at) VALUES (?,?,?,?,?,?,?,?,?)`).bind(id(),row.id,profile.sub,'STATUS_CHANGED',row.status,next,remarks,visibility,now).run()
+
+  if(next==='TRANSFERRED'){
+    await db.prepare(`INSERT INTO acics_actions (id,complaint_id,actor_id,action_type,previous_value,new_value,remarks,visibility,created_at) VALUES (?,?,?,?,?,?,?,?,?)`).bind(id(),row.id,profile.sub,'BUREAU_TRANSFERRED',row.assigned_bureau_id,targetBureauId,remarks||'Case transferred to another bureau.','INTERNAL',now).run()
+  }
+
   await db.prepare(`INSERT INTO acics_notifications (id,recipient_id,complaint_id,type,title,message,created_at) VALUES (?,?,?,?,?,?,?)`).bind(id(),row.complainant_id,row.id,'STATUS_CHANGED','Case status updated',`Your complaint ${row.complaint_number} is now ${next.replaceAll('_',' ').toLowerCase()}.`,now).run()
-  return privateJson(c,{ok:true,status:next})
+  return privateJson(c,{ok:true,status:next,assignedBureauId:updatedBureau,assignedOfficerId:updatedOfficer})
+})
+acics.patch('/complaints/:id/assign',async c=>{
+  const db=c.get('db'),profile=await getProfile(db,c.get('user').sub),row=await caseRow(db,c.req.param('id'))
+  if(!row)return c.json({error:'Complaint not found.'},404)
+  if(!['ADMIN','BUREAU_OFFICER','OFFICIAL'].includes(profile.role))return c.json({error:'Unauthorized to assign cases.'},403)
+  if(profile.role==='BUREAU_OFFICER'&&row.assigned_bureau_id!==profile.bureau_id){
+    return c.json({error:'Bureau officers can only assign cases within their assigned bureau.'},403)
+  }
+  let body:any;try{body=await c.req.json()}catch{return c.json({error:'A valid JSON request is required.'},400)}
+  const officerId=body.officerId?text(body.officerId,64):null
+  const bureauId=body.bureauId?text(body.bureauId,64):null
+  const remarks=text(body.remarks,500)
+  const now=Date.now()
+
+  let newOfficerId=row.assigned_officer_id
+  let newBureauId=row.assigned_bureau_id
+
+  if(officerId!==undefined){
+    if(officerId){
+      const officer=await db.prepare(`SELECT sub,full_name,role,bureau_id,active FROM acics_users WHERE sub=?`).bind(officerId).first<any>()
+      if(!officer||!officer.active)return c.json({error:'Selected officer does not exist or is inactive.'},400)
+      if(!['OFFICIAL','BUREAU_OFFICER','ADMIN'].includes(officer.role))return c.json({error:'Assigned user must be staff.'},400)
+      newOfficerId=officer.sub
+    }else{
+      newOfficerId=null
+    }
+  }
+
+  if(bureauId&&(profile.role==='ADMIN'||profile.role==='BUREAU_OFFICER')){
+    const b=await db.prepare(`SELECT id FROM acics_bureaus WHERE id=? AND active=1`).bind(bureauId).first<any>()
+    if(!b)return c.json({error:'Bureau not found.'},400)
+    newBureauId=b.id
+  }
+
+  await db.prepare(`UPDATE acics_complaints SET assigned_officer_id=?,assigned_bureau_id=?,last_action_at=?,updated_at=? WHERE id=?`).bind(newOfficerId,newBureauId,now,now,row.id).run()
+  await db.prepare(`INSERT INTO acics_actions (id,complaint_id,actor_id,action_type,previous_value,new_value,remarks,visibility,created_at) VALUES (?,?,?,?,?,?,?,?,?)`).bind(id(),row.id,profile.sub,'OFFICER_ASSIGNED',row.assigned_officer_id,newOfficerId,remarks||'Case assignment updated.','INTERNAL',now).run()
+
+  if(newOfficerId&&newOfficerId!==row.assigned_officer_id){
+    await db.prepare(`INSERT INTO acics_notifications (id,recipient_id,complaint_id,type,title,message,created_at) VALUES (?,?,?,?,?,?,?)`).bind(id(),newOfficerId,row.id,'ASSIGNMENT','Case assigned',`Complaint ${row.complaint_number} has been assigned to you.`,now).run()
+  }
+
+  return privateJson(c,{ok:true,assignedOfficerId:newOfficerId,assignedBureauId:newBureauId})
+})
+acics.get('/institutions-list',async c=>{
+  const db=c.get('db')
+  const q=text(c.req.query('q'),100),like=`%${q}%`
+  const rows=await db.prepare(`SELECT id,official_id AS officialId,name,state,district,institution_type AS type FROM acics_institutions WHERE active=1 AND (?='' OR name LIKE ? OR official_id LIKE ?) ORDER BY name LIMIT 100`).bind(q,like,like).all<any>()
+  return privateJson(c,{items:rows.results})
+})
+acics.get('/officers',async c=>{
+  const db=c.get('db'),profile=await getProfile(db,c.get('user').sub)
+  if(profile.role==='COMPLAINANT')return c.json({error:'Staff directory is not available to complainants.'},403)
+  const rows=await db.prepare(`SELECT u.sub,u.full_name AS fullName,u.role,u.bureau_id AS bureauId,b.code AS bureauCode FROM acics_users u LEFT JOIN acics_bureaus b ON b.id=u.bureau_id WHERE u.active=1 AND u.role IN ('OFFICIAL','BUREAU_OFFICER','ADMIN') ORDER BY u.full_name`).all<any>()
+  return privateJson(c,{items:rows.results})
 })
 acics.post('/complaints/:id/actions',async c=>{
   const db=c.get('db'),profile=await getProfile(db,c.get('user').sub),row=await caseRow(db,c.req.param('id'))
@@ -255,7 +332,7 @@ acics.patch('/overlaps/:id/review',async c=>{
   const db=c.get('db'),profile=await getProfile(db,c.get('user').sub)
   if(!['ADMIN','OFFICIAL','BUREAU_OFFICER'].includes(profile.role))return c.json({error:'Overlap review is restricted to authorized staff.'},403)
   let body:any;try{body=await c.req.json()}catch{return c.json({error:'A valid JSON request is required.'},400)}
-  const decision=text(body.decision,20),notes=text(body.notes,1000)
+  const decision=text(body.decision||body.status,20),notes=text(body.notes,1000)
   if(!['CONFIRMED','REJECTED','INVESTIGATE'].includes(decision))return c.json({error:'Decision must be CONFIRMED, REJECTED, or INVESTIGATE.'},400)
   const row=await db.prepare(`SELECT * FROM acics_overlaps WHERE id=?`).bind(c.req.param('id')).first<any>()
   if(!row)return c.json({error:'Overlap alert not found.'},404)
@@ -292,10 +369,93 @@ acics.patch('/notifications/:id/read',async c=>{
   if(!result.meta.changes)return c.json({error:'Notification not found.'},404)
   return privateJson(c,{ok:true})
 })
+acics.patch('/notifications/read-all',async c=>{
+  const db=c.get('db'),user=c.get('user')
+  await db.prepare(`UPDATE acics_notifications SET read_at=? WHERE recipient_id=? AND read_at IS NULL`).bind(Date.now(),user.sub).run()
+  return privateJson(c,{ok:true})
+})
 acics.get('/admin/users',async c=>{
-  const profile=await getProfile(c.get('db'),c.get('user').sub);if(profile.role!=='ADMIN')return c.json({error:'Administrator access required.'},403)
-  const rows=await c.get('db').prepare(`SELECT u.sub,u.full_name AS fullName,u.email,u.role,u.active,b.code AS bureau FROM acics_users u LEFT JOIN acics_bureaus b ON b.id=u.bureau_id ORDER BY u.role,u.full_name`).all<any>()
+  const db=c.get('db'),profile=await getProfile(db,c.get('user').sub)
+  if(profile.role!=='ADMIN')return c.json({error:'Administrator access required.'},403)
+  const q=text(c.req.query('q'),100),role=text(c.req.query('role'),32)
+  let sql=`SELECT u.sub,u.full_name AS fullName,u.email,u.role,u.bureau_id AS bureauId,u.active,b.code AS bureau,b.name AS bureauName FROM acics_users u LEFT JOIN acics_bureaus b ON b.id=u.bureau_id WHERE 1=1`
+  const args:unknown[]=[]
+  if(q){sql+=' AND (u.full_name LIKE ? OR u.email LIKE ? OR u.sub LIKE ?)';args.push(`%${q}%`,`%${q}%`,`%${q}%`)}
+  if(role){sql+=' AND u.role=?';args.push(role)}
+  sql+=' ORDER BY u.role,u.full_name'
+  const rows=await db.prepare(sql).bind(...args).all<any>()
   return privateJson(c,{items:rows.results})
+})
+acics.post('/admin/users',async c=>{
+  const db=c.get('db'),profile=await getProfile(db,c.get('user').sub)
+  if(profile.role!=='ADMIN')return c.json({error:'Administrator access required.'},403)
+  let body:any;try{body=await c.req.json()}catch{return c.json({error:'A valid JSON request is required.'},400)}
+  const fullName=text(body.fullName,120),email=text(body.email,160).toLowerCase(),role=text(body.role,32),bureauId=body.bureauId?text(body.bureauId,64):null
+  if(fullName.length<2||!email.includes('@')||!ROLES.includes(role as any)){
+    return c.json({error:'Provide a valid full name, email address, and role.'},400)
+  }
+  if(role==='BUREAU_OFFICER'&&!bureauId){
+    return c.json({error:'Bureau officers must be assigned to an active bureau.'},400)
+  }
+  const existing=await db.prepare(`SELECT sub FROM acics_users WHERE email=?`).bind(email).first<any>()
+  if(existing)return c.json({error:'A user with this email address already exists.'},409)
+  const newSub=`user-${id()}`,now=Date.now()
+  await db.prepare(`INSERT INTO acics_users (sub,full_name,email,role,bureau_id,active,created_at) VALUES (?,?,?,?,?,1,?)`).bind(newSub,fullName,email,role,bureauId,now).run()
+  await db.prepare(`INSERT INTO acics_actions (id,complaint_id,actor_id,action_type,new_value,remarks,visibility,created_at) VALUES (?,?,?,?,?,?,?,?)`).bind(id(),'SYSTEM',profile.sub,'USER_CREATED',role,`Created user ${fullName} (${email}) with role ${role}`,'INTERNAL',now).run()
+  return privateJson(c,{ok:true,user:{sub:newSub,fullName,email,role,bureauId,active:1}},201)
+})
+acics.patch('/admin/users/:sub',async c=>{
+  const db=c.get('db'),profile=await getProfile(db,c.get('user').sub)
+  if(profile.role!=='ADMIN')return c.json({error:'Administrator access required.'},403)
+  const targetSub=c.req.param('sub')
+  const targetUser=await db.prepare(`SELECT * FROM acics_users WHERE sub=?`).bind(targetSub).first<any>()
+  if(!targetUser)return c.json({error:'User not found.'},404)
+  let body:any;try{body=await c.req.json()}catch{return c.json({error:'A valid JSON request is required.'},400)}
+  const fullName=body.fullName!==undefined?text(body.fullName,120):targetUser.full_name
+  const role=body.role!==undefined?text(body.role,32):targetUser.role
+  const bureauId=body.bureauId!==undefined?(body.bureauId?text(body.bureauId,64):null):targetUser.bureau_id
+  const active=body.active!==undefined?(Boolean(body.active)?1:0):targetUser.active
+  if(!ROLES.includes(role as any))return c.json({error:'Invalid role specified.'},400)
+  if(targetSub===profile.sub){
+    if(role!=='ADMIN'||active===0){
+      return c.json({error:'Administrators cannot remove their own admin role or deactivate their own account.'},403)
+    }
+  }
+  const now=Date.now()
+  await db.prepare(`UPDATE acics_users SET full_name=?,role=?,bureau_id=?,active=? WHERE sub=?`).bind(fullName,role,bureauId,active,targetSub).run()
+  await db.prepare(`INSERT INTO acics_actions (id,complaint_id,actor_id,action_type,previous_value,new_value,remarks,visibility,created_at) VALUES (?,?,?,?,?,?,?,?,?)`).bind(id(),'SYSTEM',profile.sub,'USER_UPDATED',`${targetUser.role}:${targetUser.active}`,`${role}:${active}`,`Updated user ${targetSub}`,'INTERNAL',now).run()
+  return privateJson(c,{ok:true,user:{sub:targetSub,fullName,role,bureauId,active}})
+})
+acics.post('/admin/institutions',async c=>{
+  const db=c.get('db'),profile=await getProfile(db,c.get('user').sub)
+  if(profile.role!=='ADMIN')return c.json({error:'Administrator access required.'},403)
+  let body:any;try{body=await c.req.json()}catch{return c.json({error:'A valid JSON request is required.'},400)}
+  const name=text(body.name,180),officialId=text(body.officialId,64),state=text(body.state,80),district=text(body.district,80),institutionType=text(body.type||body.institutionType,80)
+  if(name.length<3||officialId.length<3||!state||!district){
+    return c.json({error:'Provide institution name, official identifier, state, and district.'},400)
+  }
+  const existing=await db.prepare(`SELECT id FROM acics_institutions WHERE official_id=?`).bind(officialId).first<any>()
+  if(existing)return c.json({error:'An institution with this identifier already exists.'},409)
+  const newId=`inst-${id()}`,now=Date.now()
+  await db.prepare(`INSERT INTO acics_institutions (id,official_id,name,normalized_name,state,district,institution_type,active,created_at,updated_at) VALUES (?,?,?,?,?,?,?,1,?,?)`).bind(newId,officialId,name,normalize(name),state,district,institutionType||'Technical institute',now,now).run()
+  await db.prepare(`INSERT INTO acics_actions (id,complaint_id,actor_id,action_type,new_value,remarks,visibility,created_at) VALUES (?,?,?,?,?,?,?,?)`).bind(id(),'SYSTEM',profile.sub,'INSTITUTION_CREATED',officialId,`Added institution ${name} (${officialId})`,'INTERNAL',now).run()
+  return privateJson(c,{ok:true,institution:{id:newId,officialId,name,state,district,type:institutionType}},201)
+})
+acics.patch('/admin/institutions/:id',async c=>{
+  const db=c.get('db'),profile=await getProfile(db,c.get('user').sub)
+  if(profile.role!=='ADMIN')return c.json({error:'Administrator access required.'},403)
+  const inst=await db.prepare(`SELECT * FROM acics_institutions WHERE id=? OR official_id=?`).bind(c.req.param('id'),c.req.param('id')).first<any>()
+  if(!inst)return c.json({error:'Institution not found.'},404)
+  let body:any;try{body=await c.req.json()}catch{return c.json({error:'A valid JSON request is required.'},400)}
+  const name=body.name!==undefined?text(body.name,180):inst.name
+  const state=body.state!==undefined?text(body.state,80):inst.state
+  const district=body.district!==undefined?text(body.district,80):inst.district
+  const type=body.type!==undefined?text(body.type,80):inst.institution_type
+  const active=body.active!==undefined?(Boolean(body.active)?1:0):inst.active
+  const now=Date.now()
+  await db.prepare(`UPDATE acics_institutions SET name=?,normalized_name=?,state=?,district=?,institution_type=?,active=?,updated_at=? WHERE id=?`).bind(name,normalize(name),state,district,type,active,now,inst.id).run()
+  await db.prepare(`INSERT INTO acics_actions (id,complaint_id,actor_id,action_type,new_value,remarks,visibility,created_at) VALUES (?,?,?,?,?,?,?,?)`).bind(id(),'SYSTEM',profile.sub,'INSTITUTION_UPDATED',inst.official_id,`Updated institution ${name}`,'INTERNAL',now).run()
+  return privateJson(c,{ok:true,institution:{id:inst.id,officialId:inst.official_id,name,state,district,type,active}})
 })
 acics.get('/admin/audit-logs',async c=>{
   const profile=await getProfile(c.get('db'),c.get('user').sub);if(profile.role!=='ADMIN')return c.json({error:'Administrator access required.'},403)

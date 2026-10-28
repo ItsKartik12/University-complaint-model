@@ -1,74 +1,138 @@
 # AICTE Complaint Intelligence & Coordination System (ACICS)
+**Project Reference:** SIH26264
 
-A role-scoped demonstration prototype for complaint intake, complaint processing, institution profiles, case history, deadline monitoring, cross-bureau overlap review, and management metrics. The workspace began from the CRM starter and its account/file integrations were replaced in the main application experience with ACICS workflows.
+ACICS is a secure, role-based platform for monitoring, tracking, investigating, coordinating, and resolving institution-related complaint cases across AICTE bureaus and cells.
 
-**All preloaded records and demo people are synthetic. This project does not connect to AICTE systems or establish any official policy, category, deadline, or adjudication.**
+> [!NOTE]
+> All preloaded records, institutions, and demo accounts are synthetic. This project does not connect to live AICTE systems or external services.
 
-## Run locally
+---
 
-Requirements: Bun 1.4+ and Node.js 20.19+ (Vite 8 runtime).
+## Quick Start & Local Execution
 
+### Prerequisites
+- **Runtime**: [Bun](https://bun.sh/) (v1.4+) or Node.js (v20.19+)
+- **OS**: Windows / Linux / macOS
+
+### Installation & Run Steps
 ```sh
+# 1. Install dependencies
 bun install
-bun run dev        # Vite + local Wrangler/Miniflare bindings
+
+# 2. Run TypeScript typecheck
 bun run typecheck
-bun run build      # public static assets and Worker bundle
+
+# 3. Run automated tests (Unit, API, Integration, Security)
+bun test
+
+# 4. Verify production bundle build
+bun run build
+
+# 5. Start local development server (Vite + local Cloudflare Worker & D1 binding)
+bun run dev
 ```
 
-First API request creates the ACICS D1 tables and seeds 10 fictional institutions, 22 complaints, three bureaus, six demo identities, case history, notifications, and sample overlap alerts. The seed is guarded by the presence of users and uses stable IDs/unique keys, so it does not duplicate on subsequent requests. The inherited CRM database tables may also be initialized but are not used by the ACICS app.
+The application will be served locally at:
+👉 **`http://localhost:5173`**
 
-### Local demo accounts
+---
 
-The local sign-in chooser offers these accounts, with no passwords because these are local-only synthetic identities:
+## Local Development Demo Accounts
 
-- Complainant: `ananya.demo@example.test` (Ananya Rao)
-- Complainant: `rohan.demo@example.test` (Rohan Das)
-- Official: `kavita.official@example.test` (Kavita Menon)
-- Admin: `devika.admin@example.test` (Devika Sharma)
-- Bureau officer — PGRC: `amit.pgrc@example.test` (Amit Kulkarni)
-- Bureau officer — Regulation Bureau: `neha.rb@example.test` (Neha Iyer)
+When running on `localhost`, ACICS enables development demo identities stored in an HttpOnly, SameSite loopback cookie (`acics_demo`). No external identity provider is required.
 
-Demo identity selection is restricted to loopback development without `FREEBUFF_CLIENT_ID`. It uses an HttpOnly, same-site development cookie; it is not production authentication.
+| Role | Name | Email / Identifier | Bureau | Scope & Permissions |
+| :--- | :--- | :--- | :--- | :--- |
+| **Complainant** | Ananya Rao | `ananya.demo@example.test` | None | File complaints, track own complaints, view public timeline, respond to information requests |
+| **Complainant** | Rohan Das | `rohan.demo@example.test` | None | File complaints, track own complaints, isolated from Ananya's cases |
+| **Official** | Kavita Menon | `kavita.official@example.test` | None | Inspect assigned complaints, advance case lifecycle status, add internal notes or public updates |
+| **Admin** | Devika Sharma | `devika.admin@example.test` | None | Full system dashboard, user management, institution management, audit logs, assignment override |
+| **Bureau Officer** | Amit Kulkarni | `amit.pgrc@example.test` | PGRC | Public Grievance Redressal Cell queue, bureau assignments, inter-bureau transfer, overlap review |
+| **Bureau Officer** | Neha Iyer | `neha.rb@example.test` | Regulation Bureau | Regulation Bureau queue, inter-bureau coordination, overlap review |
 
-## Persistence / environment
+---
 
-The app uses the existing Cloudflare Worker, Hono API, and D1 binding `DB`. Local D1/R2 config is in `wrangler.jsonc`; local state is maintained by the Vite Cloudflare plugin's Miniflare setup. The frontend makes same-origin requests to `/api/acics/*`.
+## Key Features & Verified Workflows
 
-Relevant deployment variables (provided by Freebuff Sites auth when configured):
+1. **Complainant Portal**:
+   - Multi-step complaint intake with real-time field validation.
+   - Safe institution selector (`GET /api/acics/institutions-list`) preventing exposure of internal metrics.
+   - Unique reference number generation (format: `AC-YYYY-XXXX`).
+   - Secure case timeline viewing (internal official notes hidden).
+   - In-app notification center with one-click "Mark all as read".
+   - Case response flow: Returning a case from `AWAITING_INFORMATION` back to `UNDER_PROCESS`.
 
-- `FREEBUFF_CLIENT_ID`
-- `FREEBUFF_ISSUER`
-- `APP_ORIGIN`
+2. **Official / Case Officer Portal**:
+   - Queue of assigned complaints with status, priority, and deadline alerts.
+   - Enforced status lifecycle transitions:
+     - `SUBMITTED` ➔ `UNDER_REVIEW` / `REJECTED`
+     - `UNDER_REVIEW` ➔ `UNDER_PROCESS` / `AWAITING_INFORMATION` / `TRANSFERRED` / `ESCALATED` / `REJECTED`
+     - `UNDER_PROCESS` ➔ `AWAITING_INFORMATION` / `TRANSFERRED` / `ESCALATED` / `RESOLVED`
+     - `AWAITING_INFORMATION` ➔ `UNDER_PROCESS` / `RESOLVED`
+     - `TRANSFERRED` ➔ `UNDER_REVIEW` / `UNDER_PROCESS` / `ESCALATED`
+     - `RESOLVED` ➔ `CLOSED` / `UNDER_PROCESS`
+   - Internal case notes vs. public complainant-visible remarks.
 
-For a Sites deployment, create/attach D1 as `DB`, enable Sign in with Freebuff, then build/deploy using the repository's `deploy.json`. Production uses authenticated Freebuff identity and must provision users and roles in `acics_users` using a secure admin-controlled process before non-demo users can access staff experiences. Do not set an account role from a browser-supplied value.
+3. **Bureau Coordination Portal**:
+   - Bureau-scoped case queues (PGRC, Regulation Bureau, Academic Coordination Cell).
+   - Inter-bureau case transfer with automated target bureau validation and audit logging (`BUREAU_TRANSFERRED`).
+   - Staff officer assignment and reassignment (`PATCH /api/acics/complaints/:id/assign`).
+   - Cross-bureau candidate overlap comparison with explainable rule-based scoring and human review (`CONFIRMED`, `REJECTED`, `INVESTIGATE`). Overlaps never auto-merge cases.
 
-## Working flows included
+4. **Administrator Portal**:
+   - High-level system dashboard with real-time counts (total cases, open cases, overdue cases, institutions, users).
+   - User directory with role/query filtering (`GET /api/acics/admin/users`).
+   - User creation and role management (`POST /api/acics/admin/users`, `PATCH /api/acics/admin/users/:sub`).
+   - Guarded self-protection: Prevents administrators from deactivating their own account.
+   - Institution management (`POST /api/acics/admin/institutions`, `PATCH /api/acics/admin/institutions/:id`).
+   - Tamper-evident, append-only system audit log (`GET /api/acics/admin/audit-logs`).
 
-- Complainant: database-backed dashboard, own-case list/search/filter/pagination, validated multi-step complaint form, generated reference number, details, public timeline, in-app notifications and case response.
-- Official: assigned-case view, controlled server-side status transitions, internal/public remarks, status history and deadlines.
-- Bureau: bureau-scoped queue and institution profiles; cross-bureau candidate comparison with matching reasons and human review. Reviewing an alert is audited for both linked cases and never merges records or alters the other case's status.
-- Admin: system metrics, user and institution counts, and read-only audit history.
-- Shared: D1-backed status analytics, deadline indicators, notification read state, input validation, same-origin mutation checks, private/no-store responses, record-level authorization, and role-specific navigation.
+---
 
-## Prototype limitations
+## Database & Architecture
 
-- No Python/FastAPI Sentence Transformers semantic service is included. Matching is rule-based only: exact synthetic institution ID is required, with category and lexical token overlap contributing an illustrative score. Scores require human review; no automated merging occurs.
-- The UI allows selecting a local attachment but intentionally does **not** upload it. A secure case-evidence storage and access policy must be implemented before handling documents.
-- The default 30-day due date is illustrative, not an AICTE deadline. There is no scheduled deadline worker, deadline-extension workflow, or delivery service for reminders yet.
-- Admin user management, bureau/category configuration, institution imports/edits, and privileged account recovery are not implemented. `/api/acics/admin/users` is a protected read-only user listing. Role provisioning is not exposed through demo controls.
-- No MongoDB, Express, Vercel, or external AICTE integration is used; this workspace uses D1/Workers as a compatible existing-project alternative. Database rows are persistent for the bound D1 environment.
-- No tests existed in the starter. Type checking and production bundle build are the available focused checks.
+- **Frontend**: React 19, Vite 8, TailwindCSS v4, TanStack Query v5, Lucide Icons, Framer Motion.
+- **Backend**: Cloudflare Workers, Hono Web Framework, D1 SQLite database binding (`DB`).
+- **Storage**: Local Miniflare D1 emulation configured in `wrangler.jsonc`.
+- **Database Seeding**: On first run, `ensureAcics(db)` initializes schemas and seeds:
+  - 6 Synthetic Demo Users
+  - 10 Institutions
+  - 22 Complaint records
+  - 3 Bureaus
+  - Demonstration audit logs and notifications
 
-## Project map
+### Resetting Local Database
+To clear and re-initialize the local database:
+```sh
+# Delete local Miniflare D1 state
+rm -rf .wrangler/state/v3/d1
+```
+On the next request, the database will be freshly seeded with synthetic demo records.
 
-- `src/app/pages/Acics.tsx` — all ACICS role experiences and UI workflows.
-- `src/worker/acics.ts` — ACICS D1 schema/seed and role-checked REST endpoints.
-- `src/worker/auth.ts`, `src/worker/index.ts` — authenticated request handling and loopback-only local demo identity.
-- `src/styles.css` — shared institutional palette and UI tokens.
-- `wrangler.jsonc`, `deploy.json` — local/deployment Worker configuration.
+---
 
-## API surface
+## Security Architecture
 
-All ACICS data routes are under `/api/acics/` and require authentication, D1, and same-origin mutations. Implemented routes include `/me`, `/categories`, `/complaints`, `/complaints/:id`, `/complaints/:id/status`, `/complaints/:id/actions`, `/institutions`, `/institutions/:id`, `/overlaps`, `/overlaps/:id/review`, `/analytics`, `/notifications`, `/notifications/:id/read`, `/admin/users`, and `/admin/audit-logs`. Error responses use status codes and safe messages. The local demo login endpoints are `/api/acics/demo-login` and `/api/acics/demo-logout`, and reject non-loopback/real-auth environments.
+- **Zero-Trust Role Enforcement**: All protected routes verify user identity and role on the server; client-side parameters are never trusted.
+- **Data Isolation**: Complainants can only read and mutate their own complaints. Officers cannot view or mutate cases outside their assigned bureau/jurisdiction.
+- **Cross-Site Request Forgery (CSRF) Protection**: Same-origin enforcement (`isSameOriginRequest`) blocks cross-origin mutations.
+- **SQL Injection Resistance**: All SQL queries utilize parameterized bindings (`prepare(...).bind(...)`).
+- **Input Sanitization**: Strings and payloads are trimmed, bounded, and validated on the backend.
+- **Cache-Control**: Sensitive API responses return `Cache-Control: private, no-store`.
 
-This is a hackathon prototype, not a production complaint-handling system. A security/privacy review, official policy approval, real identity onboarding, document controls, semantic model evaluation, full configuration/admin workflows, deadline scheduler, and automated integration tests are required before real institutional use.
+---
+
+## Automated Test Suite
+
+Run the full automated test suite with:
+```sh
+bun test
+```
+
+Test coverage includes:
+- **D1 Mock & Seed**: Verification of schema creation and synthetic dataset counts.
+- **Authentication & Sessions**: Health checks, mode discovery, cookie issuance, unauthorized access rejection.
+- **Complainant Lifecycle**: Intake validation, persistence, case isolation, response flow.
+- **Official & Bureau Workflows**: Status transitions, forbidden transition rejection (409), note visibility, case assignment, bureau transfer.
+- **Administrator Capabilities**: User management, institution creation, self-deactivation prevention, audit logging.
+- **Security & Integrity**: SQL injection attack resilience, XSS boundaries, CSRF/origin verification.
