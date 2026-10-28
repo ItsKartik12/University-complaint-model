@@ -1,0 +1,107 @@
+@import 'tailwindcss';
+@import '@fontsource-variable/inter';
+
+/* Design tokens. Everything rounded is a squircle (global rule below), so
+   radii run one step larger than a plain border-radius would. */
+@theme {
+  --font-sans: 'Inter Variable', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
+
+  --color-bg: #f4f6f8;
+  --color-surface: #ffffff;
+  --color-surface-2: #f1f4f6;
+  --color-raised: #e9eef2;
+  --color-line: #dce2e8;
+  --color-line-strong: #cbd4dd;
+  --color-fg: #263445;
+  --color-muted: #687586;
+  --color-faint: #8290a0;
+  --color-accent: #315f85;
+  --color-accent-soft: #eaf0f5;
+  --color-success: #277a61;
+  --color-success-soft: #e7f3ef;
+  --color-warning: #966715;
+  --color-warning-soft: #faf1dc;
+  --color-danger: #a84438;
+  --color-danger-soft: #f9ece9;
+  --color-info: #315f85;
+  --color-info-soft: #eaf0f5;
+
+  --radius-control: 8px;
+  --radius-card: 10px;
+  --radius-dialog: 12px;
+  --radius-tile: 10px;
+
+  --shadow-card: 0 1px 2px rgb(20 20 24 / 0.04), 0 0 0 1px rgb(20 20 24 / 0.04);
+  --shadow-pop: 0 0 0 1px rgb(20 20 24 / 0.06), 0 12px 40px -12px rgb(20 20 24 / 0.25);
+  --shadow-dialog: 0 0 0 1px rgb(20 20 24 / 0.06), 0 30px 80px -20px rgb(20 20 24 / 0.35);
+}
+
+@layer base {
+  *,
+  *::before,
+  *::after {
+    corner-shape: squircle;
+    border-color: var(--color-line);
+  }
+  .round,
+  .round::before,
+  .round::after {
+    corner-shape: round;
+  }
+  html {
+    background: var(--color-bg);
+    color-scheme: light;
+    overscroll-behavior: none;
+    height: 100%;
+  }
+  body {
+    background: var(--color-bg);
+    color: var(--color-fg);
+    font-family: var(--font-sans);
+    font-feature-settings: 'cv11', 'ss03';
+    font-size: 14px;
+    letter-spacing: -0.006em;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    height: 100%;
+    overflow: hidden;
+  }
+  #root {
+    height: 100%;
+  }
+  button,
+  input,
+  select,
+  textarea {
+    font: inherit;
+    letter-spacing: inherit;
+    color: inherit;
+  }
+  :focus-visible {
+    outline: 2px solid color-mix(in srgb, var(--color-accent) 55%, transparent);
+    outline-offset: 1px;
+  }
+  ::selection {
+    background: color-mix(in srgb, var(--color-accent) 22%, transparent);
+  }
+  input[type='search']::-webkit-search-cancel-button {
+    appearance: none;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      transition-duration: 0.01ms !important;
+    }
+  }
+}
+
+@utility scrollbar-thin {
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-line-strong) transparent;
+}
+
+@utility text-balance {
+  text-wrap: balance;
+}
