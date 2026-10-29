@@ -17,6 +17,11 @@ export interface Env {
   GOOGLE_CLIENT_ID?: string
   GOOGLE_CLIENT_SECRET?: string
   GOOGLE_CALLBACK_URL?: string
+  // First-administrator bootstrap. Set these on a fresh deployment only; the
+  // account is created once, and only while no administrator exists.
+  ACICS_BOOTSTRAP_ADMIN_EMAIL?: string
+  ACICS_BOOTSTRAP_ADMIN_PASSWORD?: string
+  ACICS_BOOTSTRAP_ADMIN_NAME?: string
 }
 
 export type Variables = {

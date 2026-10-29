@@ -39,7 +39,7 @@ The application will be served locally at:
 
 ## Local Development Accounts
 
-Development sign-in uses real email/password accounts seeded in the local D1 database, with server-side sessions. It is enabled only on `localhost` when no identity provider is configured and `APP_ENV` is not `production`; the sign-in screen labels it as local-only.
+Development sign-in uses real email/password accounts seeded in the local D1 database, with server-side sessions. Seeded identities exist only outside production: with `APP_ENV=production` they are neither seeded nor accepted at sign-in. The sign-in screen does not list or auto-fill accounts; use the credentials below.
 
 All seeded accounts use the development password **`AcicsPassword#2026`**.
 
@@ -69,6 +69,41 @@ Only accounts with the matching role and `ACTIVE` status can enter a portal. Mul
 ### Account requests and approval
 
 A faculty member, teacher, head of department, principal or other authorised staff member can request Complainant access from the sign-in screen. The request is stored as `PENDING_APPROVAL` with no role. An administrator approves it from **Administration → Users**, which assigns the role and writes an audit entry. Privileged roles (`OFFICIAL`, `ADMIN`, `BUREAU_OFFICER`) cannot be self-assigned.
+
+### First-administrator bootstrap
+
+ACICS has **no administrator-registration HTTP endpoint**. The first administrator is created out-of-band, and only while no `ADMIN` role exists.
+
+**Local / fresh deployment (environment bootstrap).** Add the following to `.dev.vars` and start the worker once:
+
+```sh
+ACICS_BOOTSTRAP_ADMIN_EMAIL=you@institution.ac.in
+ACICS_BOOTSTRAP_ADMIN_NAME="Your Name"
+ACICS_BOOTSTRAP_ADMIN_PASSWORD="a-strong-password-at-least-12-chars"
+```
+
+`ensureBootstrapAdmin` (`src/worker/acics.ts`) validates the email and the 12-character minimum, inserts the account, its `ADMIN` role and an `ADMIN_BOOTSTRAPPED` audit entry, then logs a warning. It is a no-op once any administrator exists, so it is safe to leave configured — but remove `ACICS_BOOTSTRAP_ADMIN_PASSWORD` after the first sign-in. Quote any value containing `#`; Wrangler treats an unquoted `#` as a comment.
+
+**Deployed D1 (remote CLI).** Load the deployed site once (so the schema exists), then run:
+
+```sh
+bun run bootstrap:admin --email you@institution.ac.in --name "Your Name" --remote --yes
+```
+
+The script prints a generated password (or accepts `--password`), refuses to run without `--remote --yes`, refuses when an administrator already exists unless `--force` is passed, and verifies the insert with a read-back. Without `--remote` it only prints the local environment-bootstrap lines above; it never writes local Miniflare SQLite files directly.
+
+### Google OAuth configuration
+
+Google sign-in is fully wired but returns `501 GOOGLE_NOT_CONFIGURED` with no session cookie until credentials exist. To enable it:
+
+1. In Google Cloud Console, create or select a project and configure the OAuth consent screen (External or Internal as appropriate). Add scopes `openid`, `email`, `profile`.
+2. Create an **OAuth client ID → Web application**.
+3. Add Authorised JavaScript origin `http://localhost:5173` (and the deployed origin in production).
+4. Add Authorised redirect URI `http://localhost:5173/api/auth/google/callback` (and `https://<deployed-host>/api/auth/google/callback`).
+5. Set `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` and `GOOGLE_CALLBACK_URL` in `.dev.vars` locally and as Worker secrets in production (`wrangler secret put`).
+6. Restart the worker; `GET /api/auth/status` then reports `googleConfigured: true` and the sign-in screen shows a Google button instead of the "Not configured" note.
+
+Live Google sign-in was **not** exercised in this environment because no real OAuth credentials were available; only the unconfigured path is verified.
 
 ---
 
@@ -128,21 +163,21 @@ A faculty member, teacher, head of department, principal or other authorised sta
   - Demonstration audit logs and notifications
 
 ### Resetting Local Database
-Local D1 state lives in `.wrangler/state/v3/d1`. If it becomes unreadable or read-only (for example after switching Miniflare/workerd versions), stop the dev server, back the directory up, then remove it:
+Local D1 state lives in `.wrangler/state/v3/d1`. If it becomes unreadable or read-only (for example after switching Miniflare/workerd versions, or after an external process wrote to the SQLite files), stop the dev server, back up the **whole** directory, then remove it:
 
 ```sh
 # 1. Stop `bun run dev`
 # 2. Back up the generated state (reversible)
-mv .wrangler/state/v3/d1/miniflare-D1DatabaseObject ~/acics-d1-backup
+mv .wrangler/state/v3/d1 .wrangler/state/v3/d1.bak
 # 3. Restart
 bun run dev
 ```
 
-The next request recreates and reseeds the database with synthetic records.
+The next request recreates and reseeds the database with synthetic records. Removing only `miniflare-D1DatabaseObject` is not enough: the peer `metadata.sqlite` keeps the old commit counter and the error returns.
 
-### Troubleshooting `SQLITE_READONLY`
+### Troubleshooting D1 storage errors
 
-A `D1_ERROR: attempt to write a readonly database` on login means the local Miniflare database file is stale or was left locked by a previous process. Stop the dev server, apply the backup-and-remove procedure above, and restart. No source change is involved; production D1 is unaffected.
+`D1_ERROR: attempt to write a readonly database` or `Failed to get session commit token: internal error` on the first request means the local Miniflare database state is stale or was committed by something other than the running workerd process. External writers (`bun:sqlite`, `wrangler d1 execute --local`, another workerd instance) invalidate the D1 session token; in this repository's OneDrive-synced folder a plain restart can do the same. Stop the dev server, apply the backup-and-remove procedure above, and restart. No source change is involved; production D1 is unaffected.
 
 ---
 
@@ -180,9 +215,11 @@ Test coverage includes:
 - **Administrator Capabilities**: User management, institution creation, self-deactivation prevention, audit logging.
 - **Security & Integrity**: SQL injection attack resilience, XSS boundaries, CSRF/origin verification.
 
-### Manual verification
+### Browser verification
 
-Browser automation was unavailable in the build environment, so verify the UI manually:
+The UI was driven end-to-end through headless Chrome over the DevTools Protocol against `bun run dev` (57 checks, all passing). Covered: all four portal cards, keyboard focus rings, empty-form validation, show/hide password, busy and eligibility states, each role dashboard, logout and session clearing, UI account request, pending denial, wrong-portal denial, and the 390 × 844 mobile layout. No uncaught exceptions or unexpected failed requests were recorded; the only 401s are the expected signed-out `/api/auth/me` probes.
+
+To repeat the key paths manually:
 
 1. `bun run dev`, open `http://localhost:5173`.
 2. Select **Complainant Portal** → sign in as `ananya.demo@example.test` / `AcicsPassword#2026` → eligibility checklist → portal opens.

@@ -17,3 +17,11 @@ FREEBUFF_ISSUER=https://freebuff.com/oidc
 GOOGLE_CLIENT_ID=
 GOOGLE_CLIENT_SECRET=
 GOOGLE_CALLBACK_URL=http://localhost:5173/api/auth/google/callback
+
+# First-administrator bootstrap (optional; set once, then remove the password).
+# The worker creates the ADMIN account only while no administrator exists.
+# There is no administrator-registration HTTP endpoint. Quote any value that
+# contains '#', otherwise it is treated as a comment.
+# ACICS_BOOTSTRAP_ADMIN_EMAIL=you@institution.ac.in
+# ACICS_BOOTSTRAP_ADMIN_NAME="Your Name"
+# ACICS_BOOTSTRAP_ADMIN_PASSWORD="a-strong-password-at-least-12-chars"

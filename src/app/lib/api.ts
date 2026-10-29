@@ -261,8 +261,6 @@ export const logout = () => api<{ ok: true }>('/auth/logout', { method: 'POST' }
 export const checkPortalAccess = (portal: PortalKey) =>
   api<PortalDecision>('/auth/portal-access', { method: 'POST', json: { portal } })
 
-export const demoLogin = (sub: string) => api<{ ok: true }>('/acics/demo-login', { method: 'POST', json: { sub } })
-
 export interface AccountRequestInput {
   fullName: string
   email: string

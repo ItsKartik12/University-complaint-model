@@ -1,7 +1,7 @@
 # ACICS — Architecture Audit & Access-Control Specification
 
 **Project:** AICTE Complaint Intelligence and Coordination System (SIH26264)
-**Last verified:** 2026-10-29 (`bun test` 56/56, `bun run typecheck` clean, `bun run build` clean)
+**Last verified:** 2026-10-29 (`bun test` 56/56, `bun run typecheck` clean, `bun run build` clean, browser audit 57/57, 19-section live API suite)
 
 ---
 
@@ -44,7 +44,7 @@ The frontend never decides eligibility. It renders what `/api/auth/me`, `/api/au
 |---|---|---|
 | **Google OAuth** | `GOOGLE_CLIENT_ID` + `GOOGLE_CLIENT_SECRET` set | `/api/auth/google` → Google → `/api/auth/google/callback`; requires an existing linked account. Unconfigured ⇒ `501`, no session issued. |
 | **Freebuff OIDC** | `FREEBUFF_CLIENT_ID` set | Upstream OIDC session verification. |
-| **Development** | loopback request, no IdP configured, `APP_ENV` ≠ production | Email/password accounts seeded in D1. Clearly labelled as local-only in the UI. |
+| **Development** | loopback request, no IdP configured, `APP_ENV` ≠ production | Email/password accounts seeded in D1. Synthetic identities are never seeded or accepted when `APP_ENV=production`. |
 | **Disabled** | `APP_ENV=production` with no IdP | `authMode()` returns `off`; synthetic/demo sign-in is unreachable. |
 
 - Sessions: `acics_session` cookie (`sessionId.expiresAt.HMAC-SHA256`), `HttpOnly`, `SameSite=Lax`, `Secure` on HTTPS, backed by `acics_sessions`.
@@ -55,9 +55,9 @@ The frontend never decides eligibility. It renders what `/api/auth/me`, `/api/au
 
 ### Google OAuth enablement checklist (prepared, not enabled)
 
-1. Create an OAuth 2.0 Web client in Google Cloud Console.
-2. Authorised redirect URI: `https://<host>/api/auth/google/callback` (locally `http://localhost:5173/api/auth/google/callback`).
-3. Set `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_CALLBACK_URL` as worker secrets/vars.
+1. Create/select a Google Cloud project and configure the OAuth consent screen with scopes `openid`, `email`, `profile`.
+2. Create an OAuth 2.0 **Web application** client. Authorised JavaScript origin: `https://<host>` (locally `http://localhost:5173`). Authorised redirect URI: `https://<host>/api/auth/google/callback` (locally `http://localhost:5173/api/auth/google/callback`).
+3. Set `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_CALLBACK_URL` as worker secrets/vars (locally in `.dev.vars`).
 4. Provision the account first: the callback links only through `google_sub`; an unknown or non-ACTIVE identity receives no session.
 5. Validation already implemented: random `state` + `nonce` stored in a short-lived HttpOnly cookie, exact callback URL match, ID token `aud` / `iss` / `exp` / `email_verified` checks via Google's tokeninfo endpoint, and no account creation from the callback.
 
@@ -111,6 +111,15 @@ Faculty, teachers, heads of departments, principals/directors and other authoris
 - Self-protection: an administrator cannot remove their own administrator role or deactivate themselves.
 - All provisioning and status transitions write to the append-only audit log.
 
+### First-administrator bootstrap (no public registration endpoint)
+
+There is deliberately no administrator-registration HTTP route. Two out-of-band paths exist, and both create an administrator **only while no `ADMIN` role exists**:
+
+1. **Environment bootstrap (local/fresh deployment)** — `ensureBootstrapAdmin` runs from `/api/*` middleware when `ACICS_BOOTSTRAP_ADMIN_EMAIL` and `ACICS_BOOTSTRAP_ADMIN_PASSWORD` are set. It validates the address and a 12-character password minimum, inserts the user, the `ADMIN` role and an `ADMIN_BOOTSTRAPPED` action, and logs a warning to remove the password. Failures are logged, never surfaced as an endpoint.
+2. **Remote CLI** — `bun run bootstrap:admin --email … --name … --remote --yes` writes through `wrangler d1 execute --remote` after checking the schema, duplicate email and existing administrators (`--force` required for a second one), then verifies with a read-back.
+
+Without `--remote` the CLI only prints environment-bootstrap instructions; it never edits local Miniflare SQLite files directly, because external writers invalidate D1 session tokens.
+
 ---
 
 ## 4. Login and Portal Experience
@@ -118,7 +127,7 @@ Faculty, teachers, heads of departments, principals/directors and other authoris
 Four-step flow in `src/app/pages/PortalAccess.tsx`:
 
 1. **Select portal** — four cards (Complainant, Official / Case Officer, Administrator, Bureau Coordination) with eligibility notes; selecting is a request, never a grant.
-2. **Sign in** — email/password with show/hide, busy state, inline errors, Google entry point (disabled with an explicit "not configured" notice until credentials exist), and clearly labelled local demo accounts in development only.
+2. **Sign in** — email/password with show/hide, busy state (spinner plus "Verifying credentials…" via `aria-busy`), inline errors, and a Google entry point that shows an explicit "Not configured" notice until credentials exist. No demo-account picker or account list is rendered; development credentials live in the README.
 3. **Verify eligibility** — visible checklist driven by the server decision.
 4. **Allow or deny** — granted: enter the workspace; denied: explicit code, account status, held roles and next action (request access / contact administrator / sign out).
 
@@ -155,15 +164,18 @@ Government-style tokens in `src/styles.css`: navy `#163A5F`, dark navy `#102A43`
 
 | Check | Result |
 |---|---|
-| `bun test` | **56 pass, 0 fail** (250 assertions, 2 files) |
+| `bun test` | **56 pass, 0 fail** (250 assertions, 2 files, 3.6 s) |
 | `bun run typecheck` | clean |
-| `bun run build` | success — worker ≈257 kB, client JS ≈503 kB (chunk-size warning only), CSS ≈48 kB |
-| Live API against `bun run dev` | login, `/me`, portal denial, route-level 403, pending/suspended blocks, admin directory verified |
-| Browser rendering | **not verified** — browser automation to localhost was blocked in this environment; manual steps in README |
+| `bun run build` | success — worker 261 kB, client JS 501 kB (chunk-size warning only), CSS 48 kB |
+| Live API against `bun run dev` | 19-section lifecycle/authorization suite on a fresh D1: request → pending → approve → sign-in, rejection, suspension/reactivation, multi-role portals, cross-user 403, cross-bureau 403, direct admin-route 403, unauthenticated 401, unknown portal 400, complaint create + re-read, audit-log rows |
+| Browser automation (headless Chrome via CDP) | **57/57 checks pass**, 0 uncaught exceptions, 0 unexpected failed requests; screenshots captured for landing, validation, checklist, all four dashboards, pending denial, portal denial, account request, mobile |
+| Google OAuth | unconfigured path live-verified: `501 GOOGLE_NOT_CONFIGURED`, no `Set-Cookie`; configured path **not tested** (no credentials) |
+| Production fail-safe | code path verified: `APP_ENV=production` without `SESSION_SECRET` returns `500 SESSION_CONFIG_MISSING` and issues no cookie; synthetic identities are rejected at login and not seeded |
 
 ### Known limitations
 
-- Browser-level UI verification was not possible; all UI claims rest on code review, typecheck, build and API-level checks.
-- Local D1 can end up in a read-only state if the `.wrangler/state` files were created by a different Miniflare/workerd version or left behind by a crashed process. Reset procedure is in README.
+- Local D1 can end up read-only or lose its commit token if the `.wrangler/state` files were written by another process (`bun:sqlite`, `wrangler d1 execute --local`, a crashed workerd) or, in this OneDrive-synced folder, after a plain restart. Reset procedure (move the whole `.wrangler/state/v3/d1` directory) is in README.
+- Live Google OAuth was not exercised; only the unconfigured and configuration-detection paths were tested.
+- First-administrator bootstrap was verified with the environment flow in production mode earlier in the audit; the remote `wrangler d1 execute` path was not run because no remote D1 exists in this environment. There is no HTTP registration endpoint.
 - Client bundle is a single chunk; code-splitting is a future optimisation, not a functional issue.
-- Google OAuth is implemented but untested against Google because no credentials exist; it fails safely with `501` until configured.
+- Browser automation used headless Chrome over CDP (Playwright was unavailable); coverage is behavioural, not pixel-diff based.

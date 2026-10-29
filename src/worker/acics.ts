@@ -3,7 +3,7 @@ import { Hono } from 'hono'
 import { privateJson } from './auth'
 import { ACCOUNT_STATUSES, ACICS_ROLES, accountStatusMessage, loadAccount, resolveActiveRole } from './authorization'
 import type { AcicsRole } from './authorization'
-import type { AppContext } from './env'
+import type { AppContext, Env } from './env'
 
 const DAY = 86_400_000
 const ROLES = ACICS_ROLES
@@ -100,8 +100,9 @@ export const DEV_DEFAULT_PASSWORD = 'AcicsPassword#2026'
 // on every request is wasteful. Guard once per database instance per isolate.
 const ensured = new WeakSet<object>()
 
-export async function ensureAcics(db: D1Database) {
+export async function ensureAcics(db: D1Database, env?: Env) {
   if (ensured.has(db as object)) return
+  const synthetic = (env?.APP_ENV ?? 'development').toLowerCase() !== 'production'
   const schema = [
     `CREATE TABLE IF NOT EXISTS acics_bureaus (id TEXT PRIMARY KEY, code TEXT UNIQUE NOT NULL, name TEXT NOT NULL, active INTEGER NOT NULL DEFAULT 1, permitted_categories TEXT NOT NULL DEFAULT '[]', created_at INTEGER NOT NULL)`,
     `CREATE TABLE IF NOT EXISTS acics_users (sub TEXT PRIMARY KEY, full_name TEXT NOT NULL, email TEXT NOT NULL, role TEXT NOT NULL DEFAULT '', bureau_id TEXT, password_hash TEXT, password_salt TEXT, failed_attempts INTEGER NOT NULL DEFAULT 0, locked_until INTEGER, active INTEGER NOT NULL DEFAULT 1, account_status TEXT NOT NULL DEFAULT 'ACTIVE', designation TEXT, institution_id TEXT, google_sub TEXT, requested_role TEXT, created_at INTEGER NOT NULL, updated_at INTEGER)`,
@@ -151,13 +152,16 @@ export async function ensureAcics(db: D1Database) {
     // Column alter fallback
   }
 
-  const defaultCreds = await hashPassword(DEV_DEFAULT_PASSWORD)
-
   // Backfill passwords, statuses, and the role join table for legacy databases.
+  // The default development password is only applied outside production, so a
+  // password-less production account can never inherit a known credential.
   try {
-    await db.prepare(`UPDATE acics_users SET password_hash=?, password_salt=? WHERE password_hash IS NULL`)
-      .bind(defaultCreds.hash, defaultCreds.salt)
-      .run()
+    if (synthetic) {
+      const defaultCreds = await hashPassword(DEV_DEFAULT_PASSWORD)
+      await db.prepare(`UPDATE acics_users SET password_hash=?, password_salt=? WHERE password_hash IS NULL`)
+        .bind(defaultCreds.hash, defaultCreds.salt)
+        .run()
+    }
     await db.prepare(`UPDATE acics_users SET account_status='ACTIVE' WHERE account_status IS NULL OR account_status=''`).run()
     await db.prepare(`INSERT OR IGNORE INTO acics_user_roles (user_sub, role, granted_at) SELECT sub, role, created_at FROM acics_users WHERE role IS NOT NULL AND role <> ''`).run()
   } catch {
@@ -175,46 +179,112 @@ export async function ensureAcics(db: D1Database) {
     db.prepare(`INSERT OR IGNORE INTO acics_bureaus (id,code,name,permitted_categories,created_at) VALUES (?,?,?,?,?)`).bind('bureau-rb','RB','Regulation Bureau',JSON.stringify(CATEGORIES),now),
     db.prepare(`INSERT OR IGNORE INTO acics_bureaus (id,code,name,permitted_categories,created_at) VALUES (?,?,?,?,?)`).bind('bureau-academic','ACADEMIC','Academic Coordination Cell',JSON.stringify(CATEGORIES),now),
   ]
-  for (const user of DEMO_USERS) {
-    inserts.push(
-      db.prepare(`INSERT OR IGNORE INTO acics_users (sub,full_name,email,role,bureau_id,password_hash,password_salt,failed_attempts,locked_until,active,account_status,designation,institution_id,created_at,updated_at) VALUES (?,?,?,?,?,?,?,0,NULL,1,'ACTIVE',?,?,?,?)`)
-        .bind(user.sub, user.name, user.email, user.role, user.bureauId, defaultCreds.hash, defaultCreds.salt, user.designation, user.institutionId, now, now)
-    )
-    for (const role of user.roles) {
+  // Synthetic identities, complaints, and institutions exist for local
+  // demonstration and automated tests only. Production starts with reference
+  // bureaus and whoever the first-administrator bootstrap creates.
+  if (synthetic) {
+    const defaultCreds = await hashPassword(DEV_DEFAULT_PASSWORD)
+    for (const user of DEMO_USERS) {
       inserts.push(
-        db.prepare(`INSERT OR IGNORE INTO acics_user_roles (user_sub, role, granted_by, granted_at) VALUES (?,?,?,?)`)
-          .bind(user.sub, role, 'seed', now)
+        db.prepare(`INSERT OR IGNORE INTO acics_users (sub,full_name,email,role,bureau_id,password_hash,password_salt,failed_attempts,locked_until,active,account_status,designation,institution_id,created_at,updated_at) VALUES (?,?,?,?,?,?,?,0,NULL,1,'ACTIVE',?,?,?,?)`)
+          .bind(user.sub, user.name, user.email, user.role, user.bureauId, defaultCreds.hash, defaultCreds.salt, user.designation, user.institutionId, now, now)
       )
+      for (const role of user.roles) {
+        inserts.push(
+          db.prepare(`INSERT OR IGNORE INTO acics_user_roles (user_sub, role, granted_by, granted_at) VALUES (?,?,?,?)`)
+            .bind(user.sub, role, 'seed', now)
+        )
+      }
     }
-  }
-  for (const user of PENDING_USERS) {
-    inserts.push(
-      db.prepare(`INSERT OR IGNORE INTO acics_users (sub,full_name,email,role,bureau_id,password_hash,password_salt,failed_attempts,locked_until,active,account_status,designation,institution_id,requested_role,created_at,updated_at) VALUES (?,?,?,?,NULL,?,?,0,NULL,1,?,?,?,?,?,?)`)
-        .bind(user.sub, user.name, user.email, user.role, defaultCreds.hash, defaultCreds.salt, user.status, user.designation, user.institutionId, user.status === 'PENDING_APPROVAL' ? 'COMPLAINANT' : null, now, now)
-    )
-    if (user.role) {
+    for (const user of PENDING_USERS) {
       inserts.push(
-        db.prepare(`INSERT OR IGNORE INTO acics_user_roles (user_sub, role, granted_by, granted_at) VALUES (?,?,?,?)`)
-          .bind(user.sub, user.role, 'seed', now)
+        db.prepare(`INSERT OR IGNORE INTO acics_users (sub,full_name,email,role,bureau_id,password_hash,password_salt,failed_attempts,locked_until,active,account_status,designation,institution_id,requested_role,created_at,updated_at) VALUES (?,?,?,?,NULL,?,?,0,NULL,1,?,?,?,?,?,?)`)
+          .bind(user.sub, user.name, user.email, user.role, defaultCreds.hash, defaultCreds.salt, user.status, user.designation, user.institutionId, user.status === 'PENDING_APPROVAL' ? 'COMPLAINANT' : null, now, now)
       )
+      if (user.role) {
+        inserts.push(
+          db.prepare(`INSERT OR IGNORE INTO acics_user_roles (user_sub, role, granted_by, granted_at) VALUES (?,?,?,?)`)
+            .bind(user.sub, user.role, 'seed', now)
+        )
+      }
     }
+    for (const [id,officialId,name,state,district,type] of INSTITUTIONS) inserts.push(db.prepare(`INSERT OR IGNORE INTO acics_institutions (id,official_id,name,normalized_name,state,district,institution_type,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)`).bind(id,officialId,name,normalize(name),state,district,type,now,now))
+    for (let i=0;i<CASES.length;i++) {
+      const [number,subject,institutionId,category,complainantId,bureauId,officerId,status,priority,dueOffset] = CASES[i]
+      const submitted = now - (38 - i) * DAY
+      const complaintId = `case-demo-${String(i+1).padStart(3,'0')}`
+      const description = demoDescription(subject, category, i)
+      inserts.push(db.prepare(`INSERT OR IGNORE INTO acics_complaints (id,complaint_number,complainant_id,institution_id,subject,description,category,priority,status,assigned_bureau_id,assigned_officer_id,due_at,public_remarks,submitted_at,last_action_at,resolved_at,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(complaintId,number,complainantId,institutionId,subject,description,category,priority,status,bureauId,officerId,now+dueOffset*DAY,status==='AWAITING_INFORMATION'?'Please provide supporting details using the case response option.':'',submitted,now-(i%5)*DAY,['RESOLVED','CLOSED'].includes(status)?now-(i%12+1)*DAY:null,submitted,now-(i%5)*DAY))
+      if (i % 2 === 0) inserts.push(db.prepare(`INSERT OR IGNORE INTO acics_actions (id,complaint_id,actor_id,action_type,previous_value,new_value,remarks,visibility,created_at) VALUES (?,?,?,?,?,?,?,?,?)`).bind(`action-demo-${i+1}`,complaintId,officerId,'STATUS_CHANGED','SUBMITTED',status,'Case updated as part of synthetic demonstration history.','PUBLIC',now-(i%5+1)*DAY))
+    }
+    inserts.push(db.prepare(`INSERT OR IGNORE INTO acics_attachments (id,complaint_id,uploader_id,file_name,file_size,mime_type,storage_key,created_at) VALUES (?,?,?,?,?,?,?,?)`).bind('att-demo-001','case-demo-001','demo-complainant','faculty_vacancy_schedule.pdf',142850,'application/pdf','acics/case-demo-001/att-demo-001-faculty_vacancy_schedule.pdf',now-5*DAY))
   }
-  for (const [id,officialId,name,state,district,type] of INSTITUTIONS) inserts.push(db.prepare(`INSERT OR IGNORE INTO acics_institutions (id,official_id,name,normalized_name,state,district,institution_type,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)`).bind(id,officialId,name,normalize(name),state,district,type,now,now))
-  for (let i=0;i<CASES.length;i++) {
-    const [number,subject,institutionId,category,complainantId,bureauId,officerId,status,priority,dueOffset] = CASES[i]
-    const submitted = now - (38 - i) * DAY
-    const complaintId = `case-demo-${String(i+1).padStart(3,'0')}`
-    const description = demoDescription(subject, category, i)
-    inserts.push(db.prepare(`INSERT OR IGNORE INTO acics_complaints (id,complaint_number,complainant_id,institution_id,subject,description,category,priority,status,assigned_bureau_id,assigned_officer_id,due_at,public_remarks,submitted_at,last_action_at,resolved_at,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(complaintId,number,complainantId,institutionId,subject,description,category,priority,status,bureauId,officerId,now+dueOffset*DAY,status==='AWAITING_INFORMATION'?'Please provide supporting details using the case response option.':'',submitted,now-(i%5)*DAY,['RESOLVED','CLOSED'].includes(status)?now-(i%12+1)*DAY:null,submitted,now-(i%5)*DAY))
-    if (i % 2 === 0) inserts.push(db.prepare(`INSERT OR IGNORE INTO acics_actions (id,complaint_id,actor_id,action_type,previous_value,new_value,remarks,visibility,created_at) VALUES (?,?,?,?,?,?,?,?,?)`).bind(`action-demo-${i+1}`,complaintId,officerId,'STATUS_CHANGED','SUBMITTED',status,'Case updated as part of synthetic demonstration history.','PUBLIC',now-(i%5+1)*DAY))
-  }
-  inserts.push(db.prepare(`INSERT OR IGNORE INTO acics_attachments (id,complaint_id,uploader_id,file_name,file_size,mime_type,storage_key,created_at) VALUES (?,?,?,?,?,?,?,?)`).bind('att-demo-001','case-demo-001','demo-complainant','faculty_vacancy_schedule.pdf',142850,'application/pdf','acics/case-demo-001/att-demo-001-faculty_vacancy_schedule.pdf',now-5*DAY))
   await db.batch(inserts)
-  await createOverlap(db,'case-demo-001','case-demo-002','PENDING',now)
-  await createOverlap(db,'case-demo-001','case-demo-003','REJECTED',now-2*DAY,'Different category and issue; example false positive for human review.')
-  await createOverlap(db,'case-demo-001','case-demo-019','CONFIRMED',now-4*DAY,'Related faculty reports retained as separate cases.')
-  await db.prepare(`INSERT OR IGNORE INTO acics_notifications (id,recipient_id,complaint_id,type,title,message,created_at) VALUES (?,?,?,?,?,?,?)`).bind('notice-demo-1','demo-complainant','case-demo-001','STATUS_CHANGED','Complaint under review','Your complaint AC-2026-1001 is being processed.',now-2*DAY).run()
+  if (synthetic) {
+    await createOverlap(db,'case-demo-001','case-demo-002','PENDING',now)
+    await createOverlap(db,'case-demo-001','case-demo-003','REJECTED',now-2*DAY,'Different category and issue; example false positive for human review.')
+    await createOverlap(db,'case-demo-001','case-demo-019','CONFIRMED',now-4*DAY,'Related faculty reports retained as separate cases.')
+    await db.prepare(`INSERT OR IGNORE INTO acics_notifications (id,recipient_id,complaint_id,type,title,message,created_at) VALUES (?,?,?,?,?,?,?)`).bind('notice-demo-1','demo-complainant','case-demo-001','STATUS_CHANGED','Complaint under review','Your complaint AC-2026-1001 is being processed.',now-2*DAY).run()
+  }
   ensured.add(db as object)
+}
+
+const SYNTHETIC_SUBS = new Set([...DEMO_USERS.map((user) => user.sub), ...PENDING_USERS.map((user) => user.sub)])
+
+/** True for the clearly-labelled synthetic identities used by local demos and tests. */
+export function isSyntheticIdentity(sub: string): boolean {
+  return SYNTHETIC_SUBS.has(sub)
+}
+
+const bootstrapped = new WeakSet<object>()
+
+/**
+ * Creates the first administrator from environment configuration on a fresh
+ * deployment. There is no registration endpoint: the account is written once,
+ * only while no administrator exists, and the variables can be removed
+ * afterwards. Guarded by a per-isolate WeakSet so it costs one query per cold
+ * start, not per request.
+ */
+export async function ensureBootstrapAdmin(env: Env, db: D1Database) {
+  if (bootstrapped.has(db as object)) return
+  const email = env.ACICS_BOOTSTRAP_ADMIN_EMAIL?.trim().toLowerCase()
+  const password = env.ACICS_BOOTSTRAP_ADMIN_PASSWORD
+  if (!email || !password) return
+  await ensureAcics(db, env)
+  try {
+    const existing = await db.prepare(`SELECT user_sub FROM acics_user_roles WHERE role='ADMIN' LIMIT 1`).first()
+    if (existing) {
+      bootstrapped.add(db as object)
+      return
+    }
+    if (password.length < 12) {
+      console.warn('[acics] ACICS_BOOTSTRAP_ADMIN_PASSWORD must be at least 12 characters; bootstrap skipped.')
+      bootstrapped.add(db as object)
+      return
+    }
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      console.warn('[acics] ACICS_BOOTSTRAP_ADMIN_EMAIL is not a valid address; bootstrap skipped.')
+      bootstrapped.add(db as object)
+      return
+    }
+    const name = (env.ACICS_BOOTSTRAP_ADMIN_NAME || '').trim().slice(0, 120) || 'ACICS Administrator'
+    const sub = 'admin-bootstrap'
+    const { hash, salt } = await hashPassword(password)
+    const now = Date.now()
+    await db.batch([
+      db.prepare(`INSERT OR IGNORE INTO acics_users (sub,full_name,email,role,bureau_id,password_hash,password_salt,failed_attempts,locked_until,active,account_status,designation,institution_id,created_at,updated_at) VALUES (?,?,?,'ADMIN',NULL,?,?,0,NULL,1,'ACTIVE','Portal Administrator',NULL,?,?)`)
+        .bind(sub, name, email, hash, salt, now, now),
+      db.prepare(`INSERT OR IGNORE INTO acics_user_roles (user_sub, role, granted_by, granted_at) VALUES (?,'ADMIN','bootstrap',?)`)
+        .bind(sub, now),
+      db.prepare(`INSERT OR IGNORE INTO acics_actions (id, complaint_id, actor_id, action_type, previous_value, new_value, remarks, visibility, created_at) VALUES (?, 'SYSTEM', ?, 'ADMIN_BOOTSTRAPPED', NULL, 'ADMIN', ?, 'INTERNAL', ?)`)
+        .bind('action-bootstrap-admin', sub, `Bootstrapped administrator ${email}`, now),
+    ])
+    const created = await db.prepare(`SELECT sub FROM acics_users WHERE sub=?`).bind(sub).first()
+    if (created) console.warn(`[acics] Bootstrapped first administrator ${email}. Remove ACICS_BOOTSTRAP_ADMIN_PASSWORD from the environment now.`)
+    bootstrapped.add(db as object)
+  } catch (error) {
+    console.error('[acics] Administrator bootstrap failed:', (error as Error).message)
+  }
 }
 
 export const inMemoryFiles = new Map<string, { buffer: Uint8Array; mime: string; name: string }>()
@@ -643,7 +713,7 @@ acics.patch('/admin/users/:sub',async c=>{
     }
   }
   const now=Date.now(),active=nextStatus==='ACTIVE'?1:0
-  await db.prepare(`UPDATE acics_users SET full_name=?,role=?,bureau_id=?,designation=?,institution_id=?,active=?,account_status=?,updated_at=? WHERE sub=?`).bind(fullName,requestedRoles[0],bureauId,designation,institutionId,active,nextStatus,now,targetSub).run()
+  await db.prepare(`UPDATE acics_users SET full_name=?,role=?,bureau_id=?,designation=?,institution_id=?,active=?,account_status=?,updated_at=? WHERE sub=?`).bind(fullName,requestedRoles[0]??'',bureauId,designation,institutionId,active,nextStatus,now,targetSub).run()
   await db.prepare(`DELETE FROM acics_user_roles WHERE user_sub=?`).bind(targetSub).run()
   for(const role of requestedRoles){
     await db.prepare(`INSERT OR IGNORE INTO acics_user_roles (user_sub,role,granted_by,granted_at) VALUES (?,?,?,?)`).bind(targetSub,role,profile.sub,now).run()

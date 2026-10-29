@@ -27,7 +27,7 @@ const statusTone=(s:string):'neutral'|'accent'|'success'|'warning'|'danger'|'inf
 const titleCase=(s:string)=>s.replaceAll('_',' ').toLowerCase().replace(/\b\w/g,(a)=>a.toUpperCase())
 async function fetchJson<T>(path:string):Promise<T>{return api<T>(`/acics${path}`)}
 
-export function Acics({account,onSwitchPortal}:{account:AuthAccount;onSwitchPortal:()=>void}){
+export function Acics({account,onSwitchPortal,onSignedOut}:{account:AuthAccount;onSwitchPortal:()=>void;onSignedOut:()=>void}){
  const qc=useQueryClient(),active=account as unknown as AcicsUser
  const [page,setPage]=useState('overview'),[query,setQuery]=useState(''),[status,setStatus]=useState(''),[category,setCategory]=useState(''),[pageNo,setPageNo]=useState(1),[selected,setSelected]=useState<string|null>(null),[compose,setCompose]=useState(false),[alertSelected,setAlertSelected]=useState<string|null>(null),[institution,setInstitution]=useState<string|null>(null)
  const toast=useToast()
@@ -46,8 +46,10 @@ export function Acics({account,onSwitchPortal}:{account:AuthAccount;onSwitchPort
    try{
      await api('/auth/logout',{method:'POST'})
      setActivePortal(null)
-     await qc.clear()
-     onSwitchPortal()
+     // Keep the auth query object alive so the gate can reset and refetch it;
+     // clearing the whole cache here left the previous account on screen.
+     qc.removeQueries({predicate: q => q.queryKey[0] !== 'auth'})
+     onSignedOut()
      toast('Signed out successfully','neutral')
    }catch(e){
      toast((e as Error).message,'danger')
@@ -68,7 +70,7 @@ export function Acics({account,onSwitchPortal}:{account:AuthAccount;onSwitchPort
    <div className="border-t border-[#d5dde5] p-3"><div className="px-2 py-2"><p className="truncate text-xs font-semibold">{active.user.name}</p><p className="truncate text-[11px] text-[#5b6573]">{active.user.email}</p></div><Button className="w-full justify-start" onClick={()=>void logout()}><LogOut/>Sign out</Button></div>
   </aside>
   <main className="min-w-0 flex-1 overflow-y-auto">
-   <header className="sticky top-0 z-10 flex min-h-[62px] items-center justify-between border-b border-t-[3px] border-[#d5dde5] border-t-[#e68a24] bg-white px-4 sm:px-7"><div><p className="text-[11px] text-[#5b6573]">AICTE / {roleName(active.role)} / <span className="text-[#1f2937]">{pageTitle(page)}</span></p><p className="mt-0.5 text-sm font-semibold text-[#102a43]">{pageTitle(page)}</p></div><div className="flex items-center gap-2"><Badge tone="accent">{roleName(active.role)}</Badge><Button size="icon-sm" aria-label="Notifications" onClick={()=>setPage('notifications')}><Bell/></Button><span className="hidden size-8 items-center justify-center rounded-full bg-[#163a5f] text-xs font-semibold text-white sm:flex">{initials(active.user.name)}</span></div></header>
+   <header className="sticky top-0 z-10 flex min-h-[62px] items-center justify-between border-b border-t-[3px] border-[#d5dde5] border-t-[#e68a24] bg-white px-4 sm:px-7"><div><p className="text-[11px] text-[#5b6573]">AICTE / {roleName(active.role)} / <span className="text-[#1f2937]">{pageTitle(page)}</span></p><p className="mt-0.5 text-sm font-semibold text-[#102a43]">{pageTitle(page)}</p></div><div className="flex items-center gap-2"><Badge tone="accent">{roleName(active.role)}</Badge><Button size="icon-sm" aria-label="Notifications" onClick={()=>setPage('notifications')}><Bell/></Button><Button size="icon-sm" aria-label="Sign out" className="md:hidden" onClick={()=>void logout()}><LogOut/></Button><span className="hidden size-8 items-center justify-center rounded-full bg-[#163a5f] text-xs font-semibold text-white sm:flex">{initials(active.user.name)}</span></div></header>
    <nav aria-label="Primary navigation" className="sticky top-[62px] z-[9] flex gap-1 overflow-x-auto border-b border-[#d5dde5] bg-white px-3 py-2 md:hidden">{NAV.filter(([, , check]) => check(active.role)).map(([label,key])=><button key={key} onClick={()=>setPage(key)} className={`shrink-0 rounded px-3 py-2 text-xs ${page===key?'bg-[#e8eef4] font-semibold text-[#102a43]':'text-[#5b6573]'}`}>{label}</button>)}</nav>
    <div className="mx-auto max-w-[1380px] p-4 sm:p-7">
     {page==='overview'&&<Overview user={active} go={setPage}/>}

@@ -45,8 +45,15 @@ export function Button({
   ...rest
 }: ComponentPropsWithoutRef<'button'> & { variant?: ButtonVariant; size?: ButtonSize; loading?: boolean }) {
   return (
-    <button type="button" className={cx(buttonBase, buttonVariants[variant], buttonSizes[size], className)} disabled={loading || rest.disabled} {...rest}>
-      {loading ? <Loader2 className="animate-spin" /> : children}
+    <button
+      type="button"
+      className={cx(buttonBase, buttonVariants[variant], buttonSizes[size], className)}
+      disabled={loading || rest.disabled}
+      aria-busy={loading || undefined}
+      {...rest}
+    >
+      {loading && <Loader2 className="animate-spin" aria-hidden />}
+      {children}
     </button>
   )
 }

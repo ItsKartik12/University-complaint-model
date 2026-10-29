@@ -33,7 +33,18 @@ function Gate() {
 
   const signedIn = async () => {
     clearedPortal.current = false
+    // Keep the resolved account while refetching: resetting here flashes the
+    // "Verifying your session" gate between the granted screen and the workspace.
     await qc.invalidateQueries({ queryKey: ['auth'] })
+    await qc.invalidateQueries({ queryKey: ['acics'] })
+  }
+
+  const signedOut = async () => {
+    clearedPortal.current = false
+    // resetQueries, not invalidateQueries: after sign-out the cached account
+    // must be dropped, otherwise a failed refetch keeps rendering the old
+    // session's workspace.
+    await qc.resetQueries({ queryKey: ['auth'] })
     await qc.invalidateQueries({ queryKey: ['acics'] })
   }
 
@@ -51,7 +62,7 @@ function Gate() {
   }
 
   if (me.data) {
-    return <Acics account={me.data} onSwitchPortal={signedIn} />
+    return <Acics account={me.data} onSwitchPortal={signedIn} onSignedOut={signedOut} />
   }
 
   if (status === 401 || showAccess) {
@@ -59,7 +70,7 @@ function Gate() {
   }
 
   if (status === 403) {
-    return <AccessHeld code={code ?? null} message={me.error instanceof Error ? me.error.message : 'Portal access is not available for this account.'} onSignOut={async () => { await logout(); setActivePortal(null); await signedIn() }} onRequestAccess={() => { setRequestMode(true); setShowAccess(true) }} />
+    return <AccessHeld code={code ?? null} message={me.error instanceof Error ? me.error.message : 'Portal access is not available for this account.'} onSignOut={async () => { await logout(); setActivePortal(null); await signedOut() }} onRequestAccess={() => { setRequestMode(true); setShowAccess(true) }} />
   }
   return (
     <AuthShell>

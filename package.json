@@ -8,7 +8,8 @@
     "build": "vite build && node scripts/postbuild.mjs",
     "preview": "vite preview",
     "test": "bun test",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "bootstrap:admin": "node scripts/bootstrap-admin.mjs"
   },
   "dependencies": {
     "@dnd-kit/core": "^6.3.1",

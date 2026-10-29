@@ -7,10 +7,8 @@ import {
   BriefcaseBusiness,
   Check,
   CheckCircle2,
-  ChevronRight,
   Eye,
   EyeOff,
-  FileWarning,
   Landmark,
   Loader2,
   Lock,
@@ -24,9 +22,9 @@ import {
 
 import { useQueryClient } from '@tanstack/react-query'
 
-import { api, ApiError, checkPortalAccess, demoLogin, login, logout, requestAccount, setActivePortal, useAuthStatus, useOnboardingOptions } from '../lib/api'
+import { api, ApiError, checkPortalAccess, login, logout, requestAccount, setActivePortal, useAuthStatus, useOnboardingOptions } from '../lib/api'
 import type { AcicsRole, PortalDecision, PortalKey } from '../lib/api'
-import { Badge, Button, Card, Checkbox, Dialog, Field, Input, Select, useToast } from '../components/ui'
+import { Badge, Button, Card, Checkbox, Dialog, Field, Input, Select } from '../components/ui'
 
 const ROLE_LABELS: Record<AcicsRole, string> = {
   COMPLAINANT: 'Complainant',
@@ -98,7 +96,6 @@ function oauthNoticeFromUrl(): string | null {
 export function PortalAccess({ onSignedIn, initialRequest = false }: { onSignedIn: () => void; initialRequest?: boolean }) {
   const { data: status } = useAuthStatus()
   const { data: onboarding } = useOnboardingOptions()
-  const toast = useToast()
   const qc = useQueryClient()
 
   const [portal, setPortal] = useState<PortalKey | null>(initialPortalFromUrl)
@@ -188,18 +185,6 @@ export function PortalAccess({ onSignedIn, initialRequest = false }: { onSignedI
         return
       }
       throw error
-    }
-  }
-
-  const useDemoAccount = async (sub: string, roles: AcicsRole[]) => {
-    const landingPortal = portal ?? portalForRoles(roles) ?? 'complainant'
-    setPortal(landingPortal)
-    try {
-      await demoLogin(sub)
-      await enterPortal(landingPortal)
-    } catch (error) {
-      toast(errorMessage(error), 'danger')
-      setStep(2)
     }
   }
 
@@ -296,11 +281,8 @@ export function PortalAccess({ onSignedIn, initialRequest = false }: { onSignedI
                   <SignInPanel
                     portal={selected}
                     googleConfigured={Boolean(status?.googleConfigured)}
-                    devAuthEnabled={Boolean(status?.devAuthEnabled)}
-                    demoAccounts={status?.demoAccounts ?? []}
                     onBack={() => setStep(1)}
                     onSubmit={submitCredentials}
-                    onDemo={useDemoAccount}
                     onForgot={() => setForgotOpen(true)}
                   />
                 ) : step === 3 && selected ? (
@@ -329,14 +311,6 @@ export function PortalAccess({ onSignedIn, initialRequest = false }: { onSignedI
       <ForgotPasswordDialog open={forgotOpen} onClose={() => setForgotOpen(false)} />
     </div>
   )
-}
-
-function portalForRoles(roles: AcicsRole[]): PortalKey | null {
-  if (roles.includes('ADMIN')) return 'admin'
-  if (roles.includes('BUREAU_OFFICER')) return 'bureau'
-  if (roles.includes('OFFICIAL')) return 'official'
-  if (roles.includes('COMPLAINANT')) return 'complainant'
-  return null
 }
 
 export function GovStrip() {
@@ -423,7 +397,7 @@ function PortalCard({
   const Icon = PORTAL_ICONS[item.key] ?? Users
   return (
     <label
-      className={`group relative flex cursor-pointer gap-3 rounded-control border p-3 transition-colors ${
+      className={`group relative flex cursor-pointer gap-3 rounded-control border p-3 transition-colors has-[:focus-visible]:border-navy has-[:focus-visible]:ring-2 has-[:focus-visible]:ring-navy/40 ${
         selected ? 'border-navy bg-accent-soft ring-1 ring-navy/20' : 'border-line bg-surface hover:border-line-strong hover:bg-surface-2'
       }`}
     >
@@ -463,27 +437,20 @@ function Assurance({ icon, title, body }: { icon: React.ReactNode; title: string
 function SignInPanel({
   portal,
   googleConfigured,
-  devAuthEnabled,
-  demoAccounts,
   onBack,
   onSubmit,
-  onDemo,
   onForgot,
 }: {
   portal: { key: PortalKey; label: string }
   googleConfigured: boolean
-  devAuthEnabled: boolean
-  demoAccounts: { sub: string; name: string; email: string; roles: AcicsRole[] }[]
   onBack: () => void
   onSubmit: (email: string, password: string) => Promise<void>
-  onDemo: (sub: string, roles: AcicsRole[]) => Promise<void>
   onForgot: () => void
 }) {
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [showPassword, setShowPassword] = useState(false)
   const [busy, setBusy] = useState(false)
-  const [demoBusy, setDemoBusy] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
 
   const submit = async (event: React.FormEvent) => {
@@ -532,7 +499,7 @@ function SignInPanel({
             placeholder="name@institution.ac.in"
             value={email}
             onChange={(e) => setEmail(e.target.value)}
-            disabled={busy || Boolean(demoBusy)}
+            disabled={busy}
           />
         </Field>
         <div>
@@ -551,7 +518,7 @@ function SignInPanel({
               placeholder="Enter your password"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
-              disabled={busy || Boolean(demoBusy)}
+              disabled={busy}
               className="pr-10"
             />
             <button
@@ -566,7 +533,7 @@ function SignInPanel({
           </div>
         </div>
 
-        <Button type="submit" variant="primary" className="w-full" loading={busy} disabled={Boolean(demoBusy)}>
+        <Button type="submit" variant="primary" className="w-full" loading={busy}>
           {busy ? 'Verifying credentials…' : 'Sign in and verify eligibility'}
           {!busy && <ArrowRight />}
         </Button>
@@ -592,45 +559,6 @@ function SignInPanel({
             Google OAuth is prepared but no client credentials are configured for this environment. When enabled, sign-in will use
             OpenID Connect with state and nonce validation, and accounts will link by Google subject — never by email address alone.
           </p>
-        </div>
-      )}
-
-      {devAuthEnabled && demoAccounts.length > 0 && (
-        <div className="mt-4 rounded-control border border-dashed border-saffron/50 bg-saffron-soft/60 p-3">
-          <p className="flex items-center gap-1.5 text-[11.5px] font-semibold text-navy-deep">
-            <FileWarning className="size-3.5 text-saffron" aria-hidden /> Local development accounts
-          </p>
-          <p className="mt-1 text-[11px] leading-relaxed text-muted">
-            Synthetic identities for testing only. They exist because this instance is running on a loopback origin without an OAuth
-            provider. Disabled in production and whenever Google OAuth is configured.
-          </p>
-          <div className="mt-2 grid gap-1.5 sm:grid-cols-2">
-            {demoAccounts.map((account) => (
-              <button
-                key={account.sub}
-                type="button"
-                disabled={Boolean(demoBusy) || busy}
-                onClick={async () => {
-                  setDemoBusy(account.sub)
-                  try {
-                    await onDemo(account.sub, account.roles)
-                  } finally {
-                    setDemoBusy(null)
-                  }
-                }}
-                className="flex items-center gap-2 rounded-control border border-line bg-surface px-2.5 py-2 text-left transition-colors hover:border-line-strong disabled:opacity-60"
-              >
-                <span className="grid size-6 shrink-0 place-items-center rounded-full bg-accent-soft text-[10px] font-semibold text-navy">
-                  {account.name.split(' ').map((part) => part[0]).slice(0, 2).join('')}
-                </span>
-                <span className="min-w-0 flex-1">
-                  <span className="block truncate text-[11.5px] font-medium text-navy-deep">{account.name}</span>
-                  <span className="block truncate text-[10.5px] text-muted">{account.roles.map((role) => ROLE_LABELS[role]).join(' + ')}</span>
-                </span>
-                {demoBusy === account.sub ? <Loader2 className="size-3.5 animate-spin text-muted" aria-hidden /> : <ChevronRight className="size-3.5 text-faint" aria-hidden />}
-              </button>
-            ))}
-          </div>
         </div>
       )}
     </div>
@@ -744,7 +672,7 @@ function DecisionPanel({
       )}
 
       <div className="mt-5 flex flex-wrap items-center justify-end gap-2">
-        {!allowed && decision.code === 'PORTAL_NOT_AUTHORIZED' && (
+        {!allowed && (
           <Button onClick={onRetry}>Choose another portal</Button>
         )}
         {!allowed && (

@@ -21,9 +21,18 @@ import { deals } from './routes/deals'
 import { files } from './routes/files'
 import { tasks } from './routes/tasks'
 import { workspace } from './routes/workspace'
-import { acics, DEMO_USERS, ensureAcics } from './acics'
+import { acics, DEMO_USERS, ensureAcics, ensureBootstrapAdmin, isSyntheticIdentity } from './acics'
 
 const app = new Hono<AppContext>()
+
+// First-administrator bootstrap, driven by environment variables rather than a
+// registration endpoint. No-op unless ACICS_BOOTSTRAP_ADMIN_* is configured.
+app.use('/api/*', async (c, next) => {
+  if (c.env.DB && (c.env.ACICS_BOOTSTRAP_ADMIN_EMAIL || c.env.ACICS_BOOTSTRAP_ADMIN_PASSWORD)) {
+    await ensureBootstrapAdmin(c.env, c.env.DB)
+  }
+  await next()
+})
 
 const SESSION_MAX_AGE = 7 * 86_400_000
 const LOOPBACK_HOSTS = ['localhost', '127.0.0.1', '[::1]']
@@ -122,7 +131,7 @@ app.get('/api/acics/health', (c) => c.json({ ok: true, status: 'operational' }))
 const handleLogin = async (c: any) => {
   const db = c.env.DB
   if (!db) return c.json({ error: 'Database service unavailable.' }, 503)
-  await ensureAcics(db)
+  await ensureAcics(db, c.env)
 
   let body: any
   try {
@@ -148,6 +157,12 @@ const handleLogin = async (c: any) => {
     .first()) as any
 
   if (!user) {
+    return c.json({ error: 'Invalid email or password.' }, 401)
+  }
+
+  // Synthetic demo identities are a development aid. Even if a database was
+  // seeded before this rule existed, they can never sign in to production.
+  if ((c.env.APP_ENV || '').toLowerCase() === 'production' && isSyntheticIdentity(user.sub)) {
     return c.json({ error: 'Invalid email or password.' }, 401)
   }
 
@@ -236,7 +251,7 @@ app.post('/api/acics/logout', handleLogout)
 app.get('/api/auth/me', async (c) => {
   const db = c.env.DB
   if (!db) return c.json({ error: 'Database service unavailable.' }, 503)
-  await ensureAcics(db)
+  await ensureAcics(db, c.env)
   const user = await currentUser(c.env, c.req.raw, db)
   if (!user) return c.json({ error: 'Sign in required.' }, 401)
 
@@ -274,7 +289,7 @@ app.get('/api/auth/me', async (c) => {
 
 app.post('/api/auth/portal-access', requireDb, requireUser, async (c) => {
   const db = c.get('db')
-  await ensureAcics(db)
+  await ensureAcics(db, c.env)
   let body: any
   try {
     body = await c.req.json()
@@ -315,7 +330,7 @@ app.post('/api/auth/portal-access', requireDb, requireUser, async (c) => {
 
 app.get('/api/auth/onboarding/options', async (c) => {
   if (!c.env.DB) return c.json({ error: 'Database service unavailable.' }, 503)
-  await ensureAcics(c.env.DB)
+  await ensureAcics(c.env.DB, c.env)
   const institutions = await c.env.DB
     .prepare(`SELECT official_id AS officialId, name, state FROM acics_institutions WHERE active=1 ORDER BY name LIMIT 200`)
     .all<any>()
@@ -331,7 +346,7 @@ app.get('/api/auth/onboarding/options', async (c) => {
 
 app.post('/api/auth/account-request', requireDb, async (c) => {
   const db = c.get('db')
-  await ensureAcics(db)
+  await ensureAcics(db, c.env)
   let body: any
   try {
     body = await c.req.json()
@@ -421,7 +436,7 @@ app.get('/api/auth/google', (c) => {
       {
         error: 'google_oauth_not_configured',
         code: 'GOOGLE_NOT_CONFIGURED',
-        message: 'Google OAuth is not configured on this ACICS instance. Set GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, and GOOGLE_CALLBACK_URL in your environment variables. Local development credentials are available instead.',
+        message: 'Google OAuth is not configured on this ACICS instance. Set GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, and GOOGLE_CALLBACK_URL in your environment variables. Local development accounts are documented in the README.',
         requiredEnv: ['GOOGLE_CLIENT_ID', 'GOOGLE_CLIENT_SECRET', 'GOOGLE_CALLBACK_URL'],
       },
       501,
@@ -497,7 +512,7 @@ app.get('/api/auth/google/callback', async (c) => {
   if (!googleConfigured(c.env) || !db) {
     return c.json({ error: 'google_oauth_not_configured', code: 'GOOGLE_NOT_CONFIGURED', message: 'Google OAuth callback cannot proceed: missing Google credentials.' }, 501)
   }
-  await ensureAcics(db)
+  await ensureAcics(db, c.env)
 
   const code = c.req.query('code')
   const state = c.req.query('state') || ''
@@ -584,7 +599,7 @@ app.post('/api/acics/demo-logout', (c) => {
 
 const api = new Hono<AppContext>()
 api.use('*', requireDb, requireUser, async (c, next) => {
-  await ensureAcics(c.get('db'))
+  await ensureAcics(c.get('db'), c.env)
   await next()
 })
 api.route('/acics', acics)
