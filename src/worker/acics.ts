@@ -12,7 +12,7 @@ const transitions: Record<string, string[]> = {
   UNDER_PROCESS: ['AWAITING_INFORMATION', 'TRANSFERRED', 'ESCALATED', 'RESOLVED'], AWAITING_INFORMATION: ['UNDER_PROCESS', 'RESOLVED'],
   TRANSFERRED: ['UNDER_REVIEW', 'UNDER_PROCESS', 'ESCALATED'], ESCALATED: ['UNDER_PROCESS', 'RESOLVED'], RESOLVED: ['CLOSED', 'UNDER_PROCESS'], CLOSED: [], REJECTED: [],
 }
-const DEMO_USERS = [
+export const DEMO_USERS = [
   { sub: 'demo-complainant', name: 'Ananya Rao', email: 'ananya.demo@example.test', role: 'COMPLAINANT', bureauId: null },
   { sub: 'demo-complainant-other', name: 'Rohan Das', email: 'rohan.demo@example.test', role: 'COMPLAINANT', bureauId: null },
   { sub: 'demo-official', name: 'Kavita Menon', email: 'kavita.official@example.test', role: 'OFFICIAL', bureauId: null },
@@ -65,10 +65,17 @@ const tokenSimilarity = (a: string, b: string) => {
   return union.size ? [...aa].filter((w) => bb.has(w)).length / union.size : 0
 }
 
+import { hashPassword } from './crypto'
+
+export const DEV_DEFAULT_PASSWORD = 'AcicsPassword#2026'
+
 export async function ensureAcics(db: D1Database) {
   const schema = [
     `CREATE TABLE IF NOT EXISTS acics_bureaus (id TEXT PRIMARY KEY, code TEXT UNIQUE NOT NULL, name TEXT NOT NULL, active INTEGER NOT NULL DEFAULT 1, permitted_categories TEXT NOT NULL DEFAULT '[]', created_at INTEGER NOT NULL)`,
-    `CREATE TABLE IF NOT EXISTS acics_users (sub TEXT PRIMARY KEY, full_name TEXT NOT NULL, email TEXT NOT NULL, role TEXT NOT NULL, bureau_id TEXT, active INTEGER NOT NULL DEFAULT 1, created_at INTEGER NOT NULL)`,
+    `CREATE TABLE IF NOT EXISTS acics_users (sub TEXT PRIMARY KEY, full_name TEXT NOT NULL, email TEXT NOT NULL, role TEXT NOT NULL, bureau_id TEXT, password_hash TEXT, password_salt TEXT, failed_attempts INTEGER NOT NULL DEFAULT 0, locked_until INTEGER, active INTEGER NOT NULL DEFAULT 1, created_at INTEGER NOT NULL)`,
+    `CREATE TABLE IF NOT EXISTS acics_sessions (id TEXT PRIMARY KEY, user_sub TEXT NOT NULL, expires_at INTEGER NOT NULL, created_at INTEGER NOT NULL)`,
+    `CREATE INDEX IF NOT EXISTS acics_sessions_lookup ON acics_sessions(id, expires_at)`,
+    `CREATE INDEX IF NOT EXISTS acics_sessions_user ON acics_sessions(user_sub)`,
     `CREATE TABLE IF NOT EXISTS acics_institutions (id TEXT PRIMARY KEY, official_id TEXT UNIQUE NOT NULL, name TEXT NOT NULL, normalized_name TEXT NOT NULL, state TEXT NOT NULL, district TEXT NOT NULL, institution_type TEXT NOT NULL, active INTEGER NOT NULL DEFAULT 1, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)`,
     `CREATE TABLE IF NOT EXISTS acics_complaints (id TEXT PRIMARY KEY, complaint_number TEXT UNIQUE NOT NULL, complainant_id TEXT NOT NULL, institution_id TEXT NOT NULL, subject TEXT NOT NULL, description TEXT NOT NULL, category TEXT NOT NULL, priority TEXT NOT NULL, status TEXT NOT NULL, assigned_bureau_id TEXT, assigned_officer_id TEXT, due_at INTEGER NOT NULL, public_remarks TEXT NOT NULL DEFAULT '', submitted_at INTEGER NOT NULL, last_action_at INTEGER NOT NULL, resolved_at INTEGER, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)`,
     `CREATE INDEX IF NOT EXISTS acics_complaints_person ON acics_complaints(complainant_id, submitted_at DESC)`,
@@ -78,8 +85,42 @@ export async function ensureAcics(db: D1Database) {
     `CREATE INDEX IF NOT EXISTS acics_actions_case ON acics_actions(complaint_id, created_at)`,
     `CREATE TABLE IF NOT EXISTS acics_overlaps (id TEXT PRIMARY KEY, pair_key TEXT UNIQUE NOT NULL, case_a TEXT NOT NULL, case_b TEXT NOT NULL, institution_id TEXT NOT NULL, source_bureau_ids TEXT NOT NULL, rule_score REAL NOT NULL, semantic_score REAL, overall_score REAL NOT NULL, reasons TEXT NOT NULL, model_version TEXT, review_status TEXT NOT NULL, reviewed_by TEXT, reviewed_at INTEGER, review_notes TEXT NOT NULL DEFAULT '', created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)`,
     `CREATE TABLE IF NOT EXISTS acics_notifications (id TEXT PRIMARY KEY, recipient_id TEXT NOT NULL, complaint_id TEXT, type TEXT NOT NULL, title TEXT NOT NULL, message TEXT NOT NULL, read_at INTEGER, created_at INTEGER NOT NULL)`,
+    `CREATE TABLE IF NOT EXISTS acics_attachments (id TEXT PRIMARY KEY, complaint_id TEXT NOT NULL, uploader_id TEXT NOT NULL, file_name TEXT NOT NULL, file_size INTEGER NOT NULL, mime_type TEXT NOT NULL, storage_key TEXT NOT NULL, created_at INTEGER NOT NULL)`,
+    `CREATE INDEX IF NOT EXISTS acics_attachments_case ON acics_attachments(complaint_id, created_at)`,
   ]
   await db.batch(schema.map((sql) => db.prepare(sql)))
+
+  // Migrate columns if table already existed without them
+  try {
+    const userCols = await db.prepare(`PRAGMA table_info(acics_users)`).all<any>()
+    const colNames = new Set((userCols.results || []).map((c: any) => c.name))
+    if (!colNames.has('password_hash')) {
+      await db.prepare('ALTER TABLE acics_users ADD COLUMN password_hash TEXT').run()
+    }
+    if (!colNames.has('password_salt')) {
+      await db.prepare('ALTER TABLE acics_users ADD COLUMN password_salt TEXT').run()
+    }
+    if (!colNames.has('failed_attempts')) {
+      await db.prepare('ALTER TABLE acics_users ADD COLUMN failed_attempts INTEGER NOT NULL DEFAULT 0').run()
+    }
+    if (!colNames.has('locked_until')) {
+      await db.prepare('ALTER TABLE acics_users ADD COLUMN locked_until INTEGER').run()
+    }
+  } catch {
+    // Column alter fallback
+  }
+
+  const defaultCreds = await hashPassword(DEV_DEFAULT_PASSWORD)
+
+  // Ensure any existing users without password have hashed credentials
+  try {
+    await db.prepare(`UPDATE acics_users SET password_hash=?, password_salt=? WHERE password_hash IS NULL`)
+      .bind(defaultCreds.hash, defaultCreds.salt)
+      .run()
+  } catch {
+    // Ignore update error
+  }
+
   const exists = await db.prepare('SELECT sub FROM acics_users LIMIT 1').first()
   if (exists) return
   const now = Date.now()
@@ -88,7 +129,12 @@ export async function ensureAcics(db: D1Database) {
     db.prepare(`INSERT OR IGNORE INTO acics_bureaus (id,code,name,permitted_categories,created_at) VALUES (?,?,?,?,?)`).bind('bureau-rb','RB','Regulation Bureau',JSON.stringify(CATEGORIES),now),
     db.prepare(`INSERT OR IGNORE INTO acics_bureaus (id,code,name,permitted_categories,created_at) VALUES (?,?,?,?,?)`).bind('bureau-academic','ACADEMIC','Academic Coordination Cell',JSON.stringify(CATEGORIES),now),
   ]
-  for (const user of DEMO_USERS) inserts.push(db.prepare(`INSERT OR IGNORE INTO acics_users (sub,full_name,email,role,bureau_id,created_at) VALUES (?,?,?,?,?,?)`).bind(user.sub,user.name,user.email,user.role,user.bureauId,now))
+  for (const user of DEMO_USERS) {
+    inserts.push(
+      db.prepare(`INSERT OR IGNORE INTO acics_users (sub,full_name,email,role,bureau_id,password_hash,password_salt,failed_attempts,locked_until,active,created_at) VALUES (?,?,?,?,?,?,?,0,NULL,1,?)`)
+        .bind(user.sub, user.name, user.email, user.role, user.bureauId, defaultCreds.hash, defaultCreds.salt, now)
+    )
+  }
   for (const [id,officialId,name,state,district,type] of INSTITUTIONS) inserts.push(db.prepare(`INSERT OR IGNORE INTO acics_institutions (id,official_id,name,normalized_name,state,district,institution_type,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)`).bind(id,officialId,name,normalize(name),state,district,type,now,now))
   for (let i=0;i<CASES.length;i++) {
     const [number,subject,institutionId,category,complainantId,bureauId,officerId,status,priority,dueOffset] = CASES[i]
@@ -98,11 +144,30 @@ export async function ensureAcics(db: D1Database) {
     inserts.push(db.prepare(`INSERT OR IGNORE INTO acics_complaints (id,complaint_number,complainant_id,institution_id,subject,description,category,priority,status,assigned_bureau_id,assigned_officer_id,due_at,public_remarks,submitted_at,last_action_at,resolved_at,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(complaintId,number,complainantId,institutionId,subject,description,category,priority,status,bureauId,officerId,now+dueOffset*DAY,status==='AWAITING_INFORMATION'?'Please provide supporting details using the case response option.':'',submitted,now-(i%5)*DAY,['RESOLVED','CLOSED'].includes(status)?now-(i%12+1)*DAY:null,submitted,now-(i%5)*DAY))
     if (i % 2 === 0) inserts.push(db.prepare(`INSERT OR IGNORE INTO acics_actions (id,complaint_id,actor_id,action_type,previous_value,new_value,remarks,visibility,created_at) VALUES (?,?,?,?,?,?,?,?,?)`).bind(`action-demo-${i+1}`,complaintId,officerId,'STATUS_CHANGED','SUBMITTED',status,'Case updated as part of synthetic demonstration history.','PUBLIC',now-(i%5+1)*DAY))
   }
+  inserts.push(db.prepare(`INSERT OR IGNORE INTO acics_attachments (id,complaint_id,uploader_id,file_name,file_size,mime_type,storage_key,created_at) VALUES (?,?,?,?,?,?,?,?)`).bind('att-demo-001','case-demo-001','demo-complainant','faculty_vacancy_schedule.pdf',142850,'application/pdf','acics/case-demo-001/att-demo-001-faculty_vacancy_schedule.pdf',now-5*DAY))
   await db.batch(inserts)
   await createOverlap(db,'case-demo-001','case-demo-002','PENDING',now)
   await createOverlap(db,'case-demo-001','case-demo-003','REJECTED',now-2*DAY,'Different category and issue; example false positive for human review.')
   await createOverlap(db,'case-demo-001','case-demo-019','CONFIRMED',now-4*DAY,'Related faculty reports retained as separate cases.')
   await db.prepare(`INSERT OR IGNORE INTO acics_notifications (id,recipient_id,complaint_id,type,title,message,created_at) VALUES (?,?,?,?,?,?,?)`).bind('notice-demo-1','demo-complainant','case-demo-001','STATUS_CHANGED','Complaint under review','Your complaint AC-2026-1001 is being processed.',now-2*DAY).run()
+}
+
+export const inMemoryFiles = new Map<string, { buffer: Uint8Array; mime: string; name: string }>()
+inMemoryFiles.set('acics/case-demo-001/att-demo-001-faculty_vacancy_schedule.pdf', {
+  buffer: new TextEncoder().encode('%PDF-1.4\n1 0 obj\n<< /Title (Faculty Vacancy Schedule) /Creator (AICTE ACICS) >>\nendobj\ntrailer\n<< /Root 1 0 R >>\n%%EOF'),
+  mime: 'application/pdf',
+  name: 'faculty_vacancy_schedule.pdf',
+})
+
+function calculateDueAt(category: string, priority: string, now = Date.now()): number {
+  let days = 30
+  if (category === 'Student grievances') days = 15
+  else if (category === 'Regulatory compliance') days = 21
+  else if (category === 'Infrastructure and facilities') days = 25
+  else if (category === 'Faculty and staffing') days = 30
+  if (priority === 'HIGH') days = Math.max(7, Math.floor(days * 0.6))
+  else if (priority === 'LOW') days = Math.floor(days * 1.3)
+  return now + days * DAY
 }
 function demoDescription(subject:string,category:string,i:number) {
   if (i===0) return 'The institution has too few qualified faculty members for the approved programme. Several core courses are being handled without appropriately qualified teaching staff.'
@@ -143,7 +208,9 @@ async function caseRow(db:D1Database,id:string) {
 }
 function mapCase(row:any,user:any) {
   const complainant=user.role==='COMPLAINANT'
-  return {id:row.id,complaintNumber:row.complaint_number,subject:row.subject,description:row.description,category:row.category,priority:row.priority,status:row.status,institution:{id:row.institution_id,officialId:row.institution_official_id,name:row.institution_name,state:row.institution_state,district:row.institution_district,type:row.institution_type},assignedBureau:complainant?null:{id:row.assigned_bureau_id,name:row.bureau_name,code:row.bureau_code},assignedOfficer:complainant?null:row.assigned_officer_id,dueAt:row.due_at,overdue:!['RESOLVED','CLOSED','REJECTED'].includes(row.status)&&row.due_at<Date.now(),publicRemarks:row.public_remarks,submittedAt:row.submitted_at,lastActionAt:row.last_action_at,resolvedAt:row.resolved_at,complainantId:complainant?undefined:row.complainant_id}
+  const now = Date.now()
+  const daysLeft = Math.round((row.due_at - now) / DAY)
+  return {id:row.id,complaintNumber:row.complaint_number,subject:row.subject,description:row.description,category:row.category,priority:row.priority,status:row.status,institution:{id:row.institution_id,officialId:row.institution_official_id,name:row.institution_name,state:row.institution_state,district:row.institution_district,type:row.institution_type},assignedBureau:complainant?null:{id:row.assigned_bureau_id,name:row.bureau_name,code:row.bureau_code},assignedOfficer:complainant?null:row.assigned_officer_id,dueAt:row.due_at,daysLeft,overdue:!['RESOLVED','CLOSED','REJECTED'].includes(row.status)&&row.due_at<now,publicRemarks:row.public_remarks,submittedAt:row.submitted_at,lastActionAt:row.last_action_at,resolvedAt:row.resolved_at,complainantId:complainant?undefined:row.complainant_id}
 }
 export const acics = new Hono<AppContext>()
 
@@ -162,12 +229,29 @@ acics.get('/complaints',async c=>{
   const db=c.get('db'),user=c.get('user'),profile=await getProfile(db,user.sub)
   let sql=`SELECT c.*,i.official_id AS institution_official_id,i.name AS institution_name,i.state AS institution_state,i.district AS institution_district,i.institution_type,b.name AS bureau_name,b.code AS bureau_code FROM acics_complaints c JOIN acics_institutions i ON i.id=c.institution_id LEFT JOIN acics_bureaus b ON b.id=c.assigned_bureau_id WHERE 1=1`
   const args:unknown[]=[]
-  if(profile.role==='COMPLAINANT'){sql+=' AND c.complainant_id=?';args.push(profile.sub)}
-  else if(profile.role==='OFFICIAL'){sql+=' AND c.assigned_officer_id=?';args.push(profile.sub)}
-  else if(profile.role==='BUREAU_OFFICER'){sql+=' AND c.assigned_bureau_id=?';args.push(profile.bureau_id)}
+  if(profile.role==='COMPLAINANT'){
+    sql+=' AND c.complainant_id=?';args.push(profile.sub)
+  }else if(profile.role==='OFFICIAL'){
+    const scope=c.req.query('scope')||'assigned'
+    if(scope==='unassigned'){
+      sql+=' AND c.assigned_officer_id IS NULL'
+    }else if(scope==='all'){
+      // all cases
+    }else{
+      sql+=' AND c.assigned_officer_id=?';args.push(profile.sub)
+    }
+  }else if(profile.role==='BUREAU_OFFICER'){
+    const scope=c.req.query('scope')||'bureau'
+    if(scope==='unassigned'){
+      sql+=' AND c.assigned_bureau_id=? AND c.assigned_officer_id IS NULL';args.push(profile.bureau_id)
+    }else{
+      sql+=' AND c.assigned_bureau_id=?';args.push(profile.bureau_id)
+    }
+  }
   const q=text(c.req.query('q'),100); if(q){sql+=' AND (c.complaint_number LIKE ? OR c.subject LIKE ? OR i.name LIKE ?)';args.push(`%${q}%`,`%${q}%`,`%${q}%`)}
   const status=text(c.req.query('status'),32);if(status){sql+=' AND c.status=?';args.push(status)}
   const category=text(c.req.query('category'),80);if(category){sql+=' AND c.category=?';args.push(category)}
+  const priority=text(c.req.query('priority'),20);if(priority){sql+=' AND c.priority=?';args.push(priority)}
   if(c.req.query('overdue')==='true')sql+=` AND c.due_at<${Date.now()} AND c.status NOT IN ('RESOLVED','CLOSED','REJECTED')`
   const page=Math.max(1,Number(c.req.query('page'))||1),size=Math.min(50,Math.max(1,Number(c.req.query('pageSize'))||12))
   const count=await db.prepare(`SELECT COUNT(*) AS total FROM (${sql})`).bind(...args).first<any>()
@@ -178,13 +262,13 @@ acics.post('/complaints',async c=>{
   const db=c.get('db'),user=c.get('user'),profile=await getProfile(db,user.sub)
   if(profile.role!=='COMPLAINANT')return c.json({error:'Only complainants can submit a complaint.'},403)
   let body:any;try{body=await c.req.json()}catch{return c.json({error:'A valid JSON request is required.'},400)}
-  const subject=text(body.subject,180),description=text(body.description,5000),category=text(body.category,80),officialId=text(body.institutionOfficialId||body.institutionId,80)
+  const subject=text(body.subject,180),description=text(body.description,5000),category=text(body.category,80),officialId=text(body.institutionOfficialId||body.institutionId,80),priority=text(body.priority||'MEDIUM',20)
   if(!CATEGORIES.includes(category))return c.json({error:'Select a valid complaint category.'},400)
   if(subject.length<8||description.length<30||!officialId)return c.json({error:'Provide a subject (at least 8 characters), a description (at least 30 characters), a category, and an institution identifier.'},400)
   const inst=await db.prepare(`SELECT id FROM acics_institutions WHERE official_id=? AND active=1`).bind(officialId).first<any>()
   if(!inst)return c.json({error:'Institution identifier was not found in the synthetic directory. Ask an administrator to add the institution.'},400)
-  const complaintId=id(),number=`AC-${new Date().getUTCFullYear()}-${Math.floor(100000+Math.random()*900000)}`,now=Date.now(),bureau=category==='Regulatory compliance'?'bureau-rb':'bureau-pgrc',due=now+30*DAY
-  await db.prepare(`INSERT INTO acics_complaints (id,complaint_number,complainant_id,institution_id,subject,description,category,priority,status,assigned_bureau_id,assigned_officer_id,due_at,submitted_at,last_action_at,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(complaintId,number,profile.sub,inst.id,subject,description,category,'MEDIUM','SUBMITTED',bureau,null,due,now,now,now,now).run()
+  const complaintId=id(),number=`AC-${new Date().getUTCFullYear()}-${Math.floor(100000+Math.random()*900000)}`,now=Date.now(),bureau=category==='Regulatory compliance'?'bureau-rb':'bureau-pgrc',due=calculateDueAt(category,priority,now)
+  await db.prepare(`INSERT INTO acics_complaints (id,complaint_number,complainant_id,institution_id,subject,description,category,priority,status,assigned_bureau_id,assigned_officer_id,due_at,submitted_at,last_action_at,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(complaintId,number,profile.sub,inst.id,subject,description,category,priority,'SUBMITTED',bureau,null,due,now,now,now,now).run()
   await db.prepare(`INSERT INTO acics_actions (id,complaint_id,actor_id,action_type,new_value,remarks,visibility,created_at) VALUES (?,?,?,?,?,?,?,?)`).bind(id(),complaintId,profile.sub,'COMPLAINT_SUBMITTED','SUBMITTED','Complaint submitted through the complainant portal.','PUBLIC',now).run()
   await db.prepare(`INSERT INTO acics_notifications (id,recipient_id,complaint_id,type,title,message,created_at) VALUES (?,?,?,?,?,?,?)`).bind(id(),profile.sub,complaintId,'SUBMITTED','Complaint received',`Your complaint ${number} has been received.`,now).run()
   const candidates=await db.prepare(`SELECT id,description,category,assigned_bureau_id FROM acics_complaints WHERE institution_id=? AND id<>? AND assigned_bureau_id<>? AND status NOT IN ('CLOSED','RESOLVED','REJECTED')`).bind(inst.id,complaintId,bureau).all<any>()
@@ -197,7 +281,8 @@ acics.get('/complaints/:id',async c=>{
   if(!canSeeCase(profile,row))return c.json({error:'You do not have permission to view this complaint.'},403)
   const actions=await db.prepare(`SELECT a.id,a.actor_id,a.action_type,a.previous_value,a.new_value,a.remarks,a.visibility,a.created_at,u.full_name AS actor_name FROM acics_actions a LEFT JOIN acics_users u ON u.sub=a.actor_id WHERE a.complaint_id=? ${profile.role==='COMPLAINANT'?"AND a.visibility='PUBLIC'":''} ORDER BY a.created_at ASC`).bind(row.id).all<any>()
   const related=profile.role==='COMPLAINANT'?[]:(await db.prepare(`SELECT o.id,o.case_a,o.case_b,o.overall_score,o.reasons,o.review_status FROM acics_overlaps o WHERE o.case_a=? OR o.case_b=?`).bind(row.id,row.id).all<any>()).results
-  return privateJson(c,{item:mapCase(row,profile),actions:actions.results.map(a=>({id:a.id,actor:a.actor_name||'System',actionType:a.action_type,previousValue:a.previous_value,newValue:a.new_value,remarks:a.remarks,visibility:a.visibility,createdAt:a.created_at})),related})
+  const attachments=await db.prepare(`SELECT id, file_name AS fileName, file_size AS fileSize, mime_type AS mimeType, created_at AS createdAt FROM acics_attachments WHERE complaint_id=? ORDER BY created_at ASC`).bind(row.id).all<any>()
+  return privateJson(c,{item:mapCase(row,profile),actions:actions.results.map(a=>({id:a.id,actor:a.actor_name||'System',actionType:a.action_type,previousValue:a.previous_value,newValue:a.new_value,remarks:a.remarks,visibility:a.visibility,createdAt:a.created_at})),related,attachments:attachments.results})
 })
 acics.patch('/complaints/:id/status',async c=>{
   const db=c.get('db'),user=c.get('user'),profile=await getProfile(db,user.sub),row=await caseRow(db,c.req.param('id'))
@@ -462,4 +547,4 @@ acics.get('/admin/audit-logs',async c=>{
   const rows=await c.get('db').prepare(`SELECT a.id,a.complaint_id AS complaintId,c.complaint_number AS complaintNumber,a.actor_id AS actorId,u.full_name AS actor,a.action_type AS actionType,a.previous_value AS previousValue,a.new_value AS newValue,a.remarks,a.visibility,a.created_at AS createdAt FROM acics_actions a LEFT JOIN acics_users u ON u.sub=a.actor_id LEFT JOIN acics_complaints c ON c.id=a.complaint_id ORDER BY a.created_at DESC LIMIT 200`).all<any>()
   return privateJson(c,{items:rows.results})
 })
-export { ROLES, DEMO_USERS }
+

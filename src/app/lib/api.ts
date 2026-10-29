@@ -12,9 +12,15 @@ export class ApiError extends Error {
   }
 }
 
+const API_BASE_URL = ((import.meta as { env?: { VITE_API_BASE_URL?: string } }).env?.VITE_API_BASE_URL ?? '/api').replace(/\/+$/, '')
+
 export async function api<T>(path: string, init?: RequestInit & { json?: unknown }): Promise<T> {
   const { json, ...rest } = init ?? {}
-  const response = await fetch(`/api${path}`, {
+  const cleanPath = path.startsWith('/') ? path : `/${path}`
+  const targetUrl = path.startsWith('http://') || path.startsWith('https://')
+    ? path
+    : `${API_BASE_URL}${cleanPath}`
+  const response = await fetch(targetUrl, {
     credentials: 'same-origin',
     ...rest,
     headers: {

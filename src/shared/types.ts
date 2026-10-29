@@ -118,3 +118,133 @@ export interface Overview {
   recentActivity: Activity[]
   upcomingTasks: Task[]
 }
+
+// ---------------------------------------------------------------------------
+// ACICS Domain Types (SIH26264)
+// ---------------------------------------------------------------------------
+
+export type AcicsRole = 'COMPLAINANT' | 'OFFICIAL' | 'ADMIN' | 'BUREAU_OFFICER'
+
+export interface AcicsUser {
+  user: {
+    sub: string
+    name: string
+    email: string
+  }
+  role: AcicsRole
+  bureau: {
+    id: string
+    name: string
+    code: string
+  } | null
+  demo: boolean
+}
+
+export interface AcicsInstitution {
+  id: string
+  officialId: string
+  name: string
+  state: string
+  district: string
+  type?: string
+  institutionType?: string
+  active?: boolean | number
+  openCases?: number
+  totalCases?: number
+}
+
+export interface AcicsBureau {
+  id: string
+  code: string
+  name: string
+  description?: string
+  active?: boolean | number
+  permittedCategories?: string[]
+}
+
+export interface AcicsCase {
+  id: string
+  complaintNumber: string
+  subject: string
+  description: string
+  category: string
+  priority: string
+  status: string
+  institution: {
+    id: string
+    officialId: string
+    name: string
+    state: string
+    district: string
+    type: string
+  }
+  assignedBureau?: {
+    id: string
+    name: string
+    code: string
+  } | null
+  assignedOfficer?: string | null
+  dueAt: number
+  overdue: boolean
+  publicRemarks: string
+  submittedAt: number
+  lastActionAt: number
+  resolvedAt: number | null
+}
+
+export interface AcicsAlert {
+  id: string
+  caseA: {
+    id: string
+    number: string
+    subject: string
+    description: string
+    category: string
+    status: string
+    bureau: string
+  }
+  caseB: {
+    id: string
+    number: string
+    subject: string
+    description: string
+    category: string
+    status: string
+    bureau: string
+  }
+  institution: {
+    id: string
+    officialId: string
+    name: string
+  }
+  score: number
+  matchingReasons: string[]
+  reviewStatus: string
+  reviewNotes: string
+  createdAt: number
+}
+
+export interface AcicsAction {
+  id: string
+  actorId?: string
+  actor?: string
+  actorName?: string
+  actionType: string
+  previousValue?: string | null
+  newValue?: string | null
+  remarks?: string
+  visibility?: 'PUBLIC' | 'INTERNAL'
+  createdAt: number
+}
+
+export interface AcicsNotification {
+  id: string
+  recipientId: string
+  complaintId?: string | null
+  type: string
+  title: string
+  message: string
+  read: boolean
+  createdAt: number
+}
+

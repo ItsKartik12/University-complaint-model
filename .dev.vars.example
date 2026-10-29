@@ -1,7 +1,19 @@
-# Copy to .dev.vars for local development with real Sign in with Freebuff.
-# Get these from `sites_enable_auth` (development variables) or
-# `npx @freebuff/auth register --environment development ...`.
-# Without them the app runs with a local development user on localhost only.
+# ==============================================================================
+# ACICS — Cloudflare Worker Local Environment (.dev.vars.example)
+# ==============================================================================
+# Copy this file to .dev.vars for local development with Miniflare/Wrangler.
+# Values in this file are injected into the Cloudflare Worker environment (c.env).
+
+APP_ENV=development
+APP_ORIGIN=http://localhost:5173
+SESSION_SECRET=replace_with_a_long_random_secret_at_least_32_characters
+
+# Optional: Enterprise OIDC Identity Provider (Freebuff)
+# When set, Freebuff handles authentication. When unset, ACICS uses built-in email/password.
 FREEBUFF_CLIENT_ID=
 FREEBUFF_ISSUER=https://freebuff.com/oidc
-APP_ORIGIN=http://localhost:5173
+
+# Google OAuth Integration (configure when ready)
+GOOGLE_CLIENT_ID=
+GOOGLE_CLIENT_SECRET=
+GOOGLE_CALLBACK_URL=http://localhost:5173/api/auth/google/callback

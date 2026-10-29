@@ -28,11 +28,14 @@ describe('ACICS Full System & API Integration Tests', () => {
     headers?: Record<string, string>
     body?: any
     demoSub?: string
+    sessionCookie?: string
   } = {}) {
     const headers = new Headers(options.headers || {})
     headers.set('Origin', 'http://localhost')
     headers.set('Host', 'localhost')
-    if (options.demoSub) {
+    if (options.sessionCookie) {
+      headers.set('Cookie', options.sessionCookie)
+    } else if (options.demoSub) {
       headers.set('Cookie', `acics_demo=${encodeURIComponent(options.demoSub)}`)
     }
     if (options.body && typeof options.body === 'object' && !(options.body instanceof FormData)) {
@@ -113,6 +116,168 @@ describe('ACICS Full System & API Integration Tests', () => {
       const body = await res.json()
       expect(body.role).toBe('ADMIN')
       expect(body.user.name).toBe('Devika Sharma')
+    })
+  })
+
+  describe('Phase 4B: Real Email/Password Authentication & Sessions', () => {
+    it('rejects login with missing email or password with 400 Bad Request', async () => {
+      const res = await request('/api/auth/login', {
+        method: 'POST',
+        body: { email: '', password: '' },
+      })
+      expect(res.status).toBe(400)
+      const data = await res.json()
+      expect(data.error).toContain('required')
+    })
+
+    it('rejects unregistered email with generic 401 error (no enumeration)', async () => {
+      const res = await request('/api/auth/login', {
+        method: 'POST',
+        body: { email: 'unknown.user@aicte-india.org', password: 'SomePassword#123' },
+      })
+      expect(res.status).toBe(401)
+      const data = await res.json()
+      expect(data.error).toBe('Invalid email or password.')
+    })
+
+    it('rejects incorrect password for registered user with generic 401 error', async () => {
+      const res = await request('/api/auth/login', {
+        method: 'POST',
+        body: { email: 'ananya.demo@example.test', password: 'WrongPassword#999' },
+      })
+      expect(res.status).toBe(401)
+      const data = await res.json()
+      expect(data.error).toBe('Invalid email or password.')
+    })
+
+    it('locks account after 5 consecutive failed login attempts with 429', async () => {
+      // 4 failed attempts
+      for (let i = 0; i < 4; i++) {
+        const r = await request('/api/auth/login', {
+          method: 'POST',
+          body: { email: 'rohan.demo@example.test', password: `Wrong#${i}` },
+        })
+        expect(r.status).toBe(401)
+      }
+      // 5th failed attempt triggers temporary lockout
+      const fifth = await request('/api/auth/login', {
+        method: 'POST',
+        body: { email: 'rohan.demo@example.test', password: 'Wrong#5' },
+      })
+      expect(fifth.status).toBe(429)
+      const fifthData = await fifth.json()
+      expect(fifthData.error).toContain('temporarily locked')
+
+      // Subsequent attempt is blocked by lockout
+      const sixth = await request('/api/auth/login', {
+        method: 'POST',
+        body: { email: 'rohan.demo@example.test', password: 'AcicsPassword#2026' },
+      })
+      expect(sixth.status).toBe(429)
+    })
+
+    it('authenticates valid credentials, sets HttpOnly acics_session cookie, and returns role', async () => {
+      const res = await request('/api/auth/login', {
+        method: 'POST',
+        body: { email: 'ananya.demo@example.test', password: 'AcicsPassword#2026' },
+      })
+      expect(res.status).toBe(200)
+      const data = await res.json()
+      expect(data.ok).toBe(true)
+      expect(data.role).toBe('COMPLAINANT')
+      expect(data.user.email).toBe('ananya.demo@example.test')
+
+      const cookie = res.headers.get('Set-Cookie')
+      expect(cookie).toContain('acics_session=')
+      expect(cookie).toContain('HttpOnly')
+      expect(cookie).toContain('SameSite=Lax')
+    })
+
+    it('authenticates all four distinct roles via server database record', async () => {
+      const testAccounts = [
+        { email: 'ananya.demo@example.test', expectedRole: 'COMPLAINANT', name: 'Ananya Rao' },
+        { email: 'kavita.official@example.test', expectedRole: 'OFFICIAL', name: 'Kavita Menon' },
+        { email: 'devika.admin@example.test', expectedRole: 'ADMIN', name: 'Devika Sharma' },
+        { email: 'amit.pgrc@example.test', expectedRole: 'BUREAU_OFFICER', name: 'Amit Kulkarni' },
+      ]
+
+      for (const account of testAccounts) {
+        const res = await request('/api/auth/login', {
+          method: 'POST',
+          body: { email: account.email, password: 'AcicsPassword#2026' },
+        })
+        expect(res.status).toBe(200)
+        const data = await res.json()
+        expect(data.role).toBe(account.expectedRole)
+        expect(data.user.name).toBe(account.name)
+
+        // Session check with cookie
+        const cookie = res.headers.get('Set-Cookie')!.split(';')[0]
+        const meRes = await request('/api/auth/me', { sessionCookie: cookie })
+        expect(meRes.status).toBe(200)
+        const meData = await meRes.json()
+        expect(meData.role).toBe(account.expectedRole)
+        expect(meData.user.email).toBe(account.email)
+      }
+    })
+
+    it('rejects tampered or forged session token with 401', async () => {
+      const res = await request('/api/auth/me', {
+        sessionCookie: 'acics_session=forged-session-id.9999999999999.invalid-signature',
+      })
+      expect(res.status).toBe(401)
+      const data = await res.json()
+      expect(data.error).toContain('Sign in required')
+    })
+
+    it('destroys session and clears cookie upon logout', async () => {
+      // 1. Login
+      const loginRes = await request('/api/auth/login', {
+        method: 'POST',
+        body: { email: 'devika.admin@example.test', password: 'AcicsPassword#2026' },
+      })
+      const cookie = loginRes.headers.get('Set-Cookie')!.split(';')[0]
+
+      // 2. Logout
+      const logoutRes = await request('/api/auth/logout', {
+        method: 'POST',
+        sessionCookie: cookie,
+      })
+      expect(logoutRes.status).toBe(200)
+      const logoutCookie = logoutRes.headers.get('Set-Cookie')
+      expect(logoutCookie).toContain('acics_session=;')
+      expect(logoutCookie).toContain('Max-Age=0')
+
+      // 3. Re-verify session is invalidated
+      const meRes = await request('/api/auth/me', { sessionCookie: cookie })
+      expect(meRes.status).toBe(401)
+    })
+
+    it('handles forgot password with secure non-enumerating message', async () => {
+      const res = await request('/api/auth/forgot-password', {
+        method: 'POST',
+        body: { email: 'anyone@institution.gov.in' },
+      })
+      expect(res.status).toBe(200)
+      const data = await res.json()
+      expect(data.ok).toBe(true)
+      expect(data.message).toContain('guidance has been queued')
+
+      // Rejects invalid email
+      const badRes = await request('/api/auth/forgot-password', {
+        method: 'POST',
+        body: { email: 'invalid-email-format' },
+      })
+      expect(badRes.status).toBe(400)
+    })
+
+    it('returns 501 informative response when Google OAuth is invoked without credentials', async () => {
+      const res = await request('/api/auth/google')
+      expect(res.status).toBe(501)
+      const data = await res.json()
+      expect(data.error).toBe('google_oauth_not_configured')
+      expect(data.message).toContain('Google OAuth is not configured')
+      expect(data.requiredEnv).toContain('GOOGLE_CLIENT_ID')
     })
   })
 

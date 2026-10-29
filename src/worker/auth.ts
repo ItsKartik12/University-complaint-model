@@ -45,17 +45,62 @@ export function getAuth(env: Env, request: Request): FreebuffAuth | null {
   return cached.auth
 }
 
-export async function currentUser(env: Env, request: Request): Promise<FreebuffUser | null> {
+import { verifySessionToken } from './crypto'
+
+export async function currentUser(env: Env, request: Request, db?: D1Database): Promise<FreebuffUser | null> {
   const auth = getAuth(env, request)
   if (auth) return auth.getUser(request)
-  if (authMode(env, request) !== 'development') return null
-  const cookie = request.headers.get('cookie')?.split(';').map((part) => part.trim()).find((part) => part.startsWith('acics_demo='))
-  const demoSub = cookie ? decodeURIComponent(cookie.slice('acics_demo='.length)) : undefined
-  if (demoSub && demoSub.startsWith('demo-')) {
-    const { DEMO_USERS } = await import('./acics')
-    const demo = DEMO_USERS.find((candidate) => candidate.sub === demoSub)
-    if (demo) return { sub: demo.sub, name: demo.name, email: demo.email, email_verified: true }
+
+  const cookieHeader = request.headers.get('cookie') || ''
+  const cookies = Object.fromEntries(
+    cookieHeader.split(';').map((part) => {
+      const [k, ...v] = part.trim().split('=')
+      return [k, decodeURIComponent(v.join('='))]
+    })
+  )
+
+  // 1. Authenticate via secure acics_session cookie backed by database
+  const sessionToken = cookies['acics_session']
+  const activeDb = db || env.DB
+  if (sessionToken && activeDb) {
+    const secret = env.SESSION_SECRET || 'acics_dev_session_secret_key_32bytes_min'
+    const verified = await verifySessionToken(sessionToken, secret)
+    if (verified) {
+      try {
+        const sessionRow = await activeDb
+          .prepare(
+            `SELECT u.sub, u.full_name, u.email, u.role, u.active 
+             FROM acics_sessions s 
+             JOIN acics_users u ON u.sub = s.user_sub 
+             WHERE s.id = ? AND s.expires_at > ? AND u.active = 1`
+          )
+          .bind(verified.sessionId, Date.now())
+          .first<any>()
+
+        if (sessionRow) {
+          return {
+            sub: sessionRow.sub,
+            name: sessionRow.full_name,
+            email: sessionRow.email,
+            email_verified: true,
+          }
+        }
+      } catch {
+        // Table or lookup error fallback
+      }
+    }
   }
+
+  // 2. Local loopback demo cookie (maintained for automated integration tests)
+  if (authMode(env, request) === 'development') {
+    const demoSub = cookies['acics_demo']
+    if (demoSub && demoSub.startsWith('demo-')) {
+      const { DEMO_USERS } = await import('./acics')
+      const demo = DEMO_USERS.find((candidate) => candidate.sub === demoSub)
+      if (demo) return { sub: demo.sub, name: demo.name, email: demo.email, email_verified: true }
+    }
+  }
+
   return null
 }
 
@@ -69,7 +114,7 @@ export const requireUser: MiddlewareHandler<AppContext> = async (c, next) => {
   if (request.method !== 'GET' && request.method !== 'HEAD' && !isSameOriginRequest(request, appOrigin(c.env, request))) {
     return c.json({ error: 'Cross-origin request refused.' }, 403)
   }
-  const user = await currentUser(c.env, request)
+  const user = await currentUser(c.env, request, c.get('db') || c.env.DB)
   if (!user) return c.json({ error: 'Sign in required.' }, 401)
   c.set('user', user)
   await next()

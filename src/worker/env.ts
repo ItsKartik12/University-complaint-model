@@ -10,6 +10,11 @@ export interface Env {
   FREEBUFF_CLIENT_ID?: string
   FREEBUFF_ISSUER?: string
   APP_ORIGIN?: string
+  APP_ENV?: string
+  SESSION_SECRET?: string
+  GOOGLE_CLIENT_ID?: string
+  GOOGLE_CLIENT_SECRET?: string
+  GOOGLE_CALLBACK_URL?: string
 }
 
 export type Variables = {
