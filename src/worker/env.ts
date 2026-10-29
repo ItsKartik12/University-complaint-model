@@ -1,5 +1,7 @@
 import type { FreebuffUser } from '@freebuff/auth'
 
+import type { AcicsAccount, AcicsRole, PortalKey } from './authorization'
+
 export interface Env {
   ASSETS: Fetcher
   // Attached by Freebuff Sites once provisioned (sites_add_storage). Optional so
@@ -20,6 +22,19 @@ export interface Env {
 export type Variables = {
   user: FreebuffUser
   db: D1Database
+  /** Full ACICS account record, loaded and authorized for every /api/acics request. */
+  account: AcicsAccount
+  /** Effective role for this request (from the x-acics-portal header or primary role). */
+  activeRole: AcicsRole
+  activePortal: PortalKey | null
+  /** Account view with the effective role and legacy snake_case fields used by routes. */
+  profile: AcicsAccount & {
+    role: AcicsRole
+    bureau_id: string | null
+    bureau_name: string | null
+    bureau_code: string | null
+    full_name: string
+  }
 }
 
 export type AppContext = { Bindings: Env; Variables: Variables }

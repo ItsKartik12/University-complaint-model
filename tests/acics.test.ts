@@ -29,10 +29,14 @@ describe('ACICS Full System & API Integration Tests', () => {
     body?: any
     demoSub?: string
     sessionCookie?: string
+    portal?: string
   } = {}) {
     const headers = new Headers(options.headers || {})
     headers.set('Origin', 'http://localhost')
     headers.set('Host', 'localhost')
+    if (options.portal) {
+      headers.set('x-acics-portal', options.portal)
+    }
     if (options.sessionCookie) {
       headers.set('Cookie', options.sessionCookie)
     } else if (options.demoSub) {
@@ -664,6 +668,212 @@ describe('ACICS Full System & API Integration Tests', () => {
       expect(res.status).toBe(403)
       const data = await res.json()
       expect(data.error).toContain('Cross-origin request refused')
+    })
+  })
+
+  describe('Phase 10: Portal eligibility, multi-role access, and account approval', () => {
+    it('publishes portal metadata without exposing demo identities in production mode', async () => {
+      const res = await request('/api/auth/status')
+      expect(res.status).toBe(200)
+      const data = await res.json()
+      expect(data.portals.map((p: any) => p.key)).toEqual(['complainant', 'official', 'admin', 'bureau'])
+      expect(data.googleConfigured).toBe(false)
+      expect(Array.isArray(data.demoAccounts)).toBe(true)
+
+      const production = await worker.fetch(
+        new Request('http://localhost/api/auth/status', { headers: { Origin: 'http://localhost' } }),
+        { ...env, APP_ENV: 'production' } as any,
+        {} as any,
+      )
+      const productionData = await production.json()
+      expect(productionData.demoAccounts).toEqual([])
+    })
+
+    it('authenticates but does not grant a portal merely because it was selected', async () => {
+      const res = await request('/api/auth/login', {
+        method: 'POST',
+        body: { email: 'ananya.demo@example.test', password: 'AcicsPassword#2026', portal: 'admin' },
+      })
+      expect(res.status).toBe(200)
+      const data = await res.json()
+      expect(data.ok).toBe(true)
+      expect(data.role).toBe('COMPLAINANT')
+      expect(data.access.allowed).toBe(false)
+      expect(data.access.code).toBe('PORTAL_NOT_AUTHORIZED')
+    })
+
+    it('rejects a portal header the account does not hold on protected routes', async () => {
+      const res = await request('/api/acics/complaints', { demoSub: 'demo-complainant', portal: 'admin' })
+      expect(res.status).toBe(403)
+      const data = await res.json()
+      expect(data.code).toBe('PORTAL_NOT_AUTHORIZED')
+    })
+
+    it('rejects unknown portal headers instead of silently ignoring them', async () => {
+      const me = await request('/api/auth/me', { demoSub: 'demo-complainant', portal: 'superuser' })
+      expect(me.status).toBe(400)
+      expect((await me.json()).code).toBe('PORTAL_UNKNOWN')
+
+      const queue = await request('/api/acics/complaints', { demoSub: 'demo-complainant', portal: 'root' })
+      expect(queue.status).toBe(403)
+      expect((await queue.json()).code).toBe('PORTAL_UNKNOWN')
+    })
+
+    it('lets a multi-role account into each held portal but not unheld ones', async () => {
+      const complainant = await request('/api/acics/complaints', { demoSub: 'demo-multirole', portal: 'complainant' })
+      expect(complainant.status).toBe(200)
+
+      const official = await request('/api/acics/complaints?scope=assigned', { demoSub: 'demo-multirole', portal: 'official' })
+      expect(official.status).toBe(200)
+
+      const admin = await request('/api/acics/admin/users', { demoSub: 'demo-multirole', portal: 'admin' })
+      expect(admin.status).toBe(403)
+    })
+
+    it('blocks accounts awaiting approval and suspended accounts with explicit codes', async () => {
+      const pending = await request('/api/auth/login', {
+        method: 'POST',
+        body: { email: 'suresh.pending@example.test', password: 'AcicsPassword#2026' },
+      })
+      expect(pending.status).toBe(403)
+      const pendingData = await pending.json()
+      expect(pendingData.code).toBe('ACCOUNT_PENDING_APPROVAL')
+      expect(pendingData.error).toContain('awaiting approval')
+
+      const suspended = await request('/api/auth/login', {
+        method: 'POST',
+        body: { email: 'meera.suspended@example.test', password: 'AcicsPassword#2026' },
+      })
+      expect(suspended.status).toBe(403)
+      expect((await suspended.json()).code).toBe('ACCOUNT_SUSPENDED')
+    })
+
+    it('exposes complainant onboarding options publicly', async () => {
+      const res = await request('/api/auth/onboarding/options')
+      expect(res.status).toBe(200)
+      const data = await res.json()
+      expect(data.designations).toContain('Assistant Professor')
+      expect(data.institutions.length).toBeGreaterThan(0)
+      expect(data.requestedPortal).toBe('complainant')
+    })
+
+    it('refuses privileged self-assignment and invalid designations during account requests', async () => {
+      const privileged = await request('/api/auth/account-request', {
+        method: 'POST',
+        body: {
+          fullName: 'Rising Admin',
+          email: `rising.admin.${Date.now()}@example.test`,
+          password: 'RequestPassword#123',
+          designation: 'Assistant Professor',
+          institutionOfficialId: 'AICTE-DEMO-001',
+          requestedPortal: 'admin',
+        },
+      })
+      expect(privileged.status).toBe(403)
+      expect((await privileged.json()).code).toBe('PRIVILEGED_PORTAL_DENIED')
+
+      const forgedRole = await request('/api/auth/account-request', {
+        method: 'POST',
+        body: {
+          fullName: 'Role Forger',
+          email: `role.forger.${Date.now()}@example.test`,
+          password: 'RequestPassword#123',
+          designation: 'Assistant Professor',
+          institutionOfficialId: 'AICTE-DEMO-001',
+          role: 'ADMIN',
+        },
+      })
+      expect(forgedRole.status).toBe(403)
+      expect((await forgedRole.json()).code).toBe('PRIVILEGED_ROLE_DENIED')
+
+      const invalidDesignation = await request('/api/auth/account-request', {
+        method: 'POST',
+        body: {
+          fullName: 'Invalid Designation',
+          email: `invalid.designation.${Date.now()}@example.test`,
+          password: 'RequestPassword#123',
+          designation: 'Freelance consultant',
+          institutionOfficialId: 'AICTE-DEMO-001',
+        },
+      })
+      expect(invalidDesignation.status).toBe(400)
+    })
+
+    it('records an account request, blocks sign-in, then allows it after administrator approval', async () => {
+      const email = `approved.faculty.${Date.now()}@example.test`
+      const created = await request('/api/auth/account-request', {
+        method: 'POST',
+        body: {
+          fullName: 'Approved Faculty',
+          email,
+          password: 'RequestPassword#123',
+          designation: 'Assistant Professor',
+          institutionOfficialId: 'AICTE-DEMO-001',
+        },
+      })
+      expect(created.status).toBe(201)
+      expect((await created.json()).status).toBe('PENDING_APPROVAL')
+
+      const row = await db.prepare('SELECT * FROM acics_users WHERE lower(email)=?').bind(email).first<any>()
+      expect(row).not.toBeNull()
+      expect(row.account_status).toBe('PENDING_APPROVAL')
+      expect(row.role).toBe('')
+      expect(row.requested_role).toBe('COMPLAINANT')
+
+      const beforeApproval = await request('/api/auth/login', {
+        method: 'POST',
+        body: { email, password: 'RequestPassword#123' },
+      })
+      expect(beforeApproval.status).toBe(403)
+      expect((await beforeApproval.json()).code).toBe('ACCOUNT_PENDING_APPROVAL')
+
+      const approval = await request(`/api/acics/admin/users/${row.sub}`, {
+        method: 'PATCH',
+        demoSub: 'demo-admin',
+        body: { accountStatus: 'ACTIVE', roles: ['COMPLAINANT'] },
+      })
+      expect(approval.status).toBe(200)
+
+      const afterApproval = await request('/api/auth/login', {
+        method: 'POST',
+        body: { email, password: 'RequestPassword#123', portal: 'complainant' },
+      })
+      expect(afterApproval.status).toBe(200)
+      const loginData = await afterApproval.json()
+      expect(loginData.access.allowed).toBe(true)
+      expect(loginData.role).toBe('COMPLAINANT')
+
+      const cookie = afterApproval.headers.get('Set-Cookie')!.split(';')[0]
+      const queue = await request('/api/acics/complaints', { sessionCookie: cookie, portal: 'complainant' })
+      expect(queue.status).toBe(200)
+
+      const audit = await db
+        .prepare(`SELECT * FROM acics_actions WHERE action_type='USER_ACCESS_REQUESTED' AND actor_id=?`)
+        .bind(row.sub)
+        .first<any>()
+      expect(audit).not.toBeNull()
+    })
+
+    it('prevents an administrator from removing their own administrator role', async () => {
+      const res = await request('/api/acics/admin/users/demo-admin', {
+        method: 'PATCH',
+        demoSub: 'demo-admin',
+        body: { roles: ['COMPLAINANT'], accountStatus: 'ACTIVE' },
+      })
+      expect(res.status).toBe(403)
+    })
+
+    it('disables synthetic demo sign-in when production mode is configured', async () => {
+      const res = await worker.fetch(
+        new Request('http://localhost/api/acics/demo-login', {
+          method: 'POST',
+          headers: { Origin: 'http://localhost', 'Content-Type': 'application/json' },
+          body: JSON.stringify({ sub: 'demo-admin' }),
+        }),
+        { ...env, APP_ENV: 'production' } as any,
+        {} as any,
+      )
+      expect(res.status).toBe(403)
     })
   })
 })

@@ -37,22 +37,50 @@ The application will be served locally at:
 
 ---
 
-## Local Development Demo Accounts
+## Local Development Accounts
 
-When running on `localhost`, ACICS enables development demo identities stored in an HttpOnly, SameSite loopback cookie (`acics_demo`). No external identity provider is required.
+Development sign-in uses real email/password accounts seeded in the local D1 database, with server-side sessions. It is enabled only on `localhost` when no identity provider is configured and `APP_ENV` is not `production`; the sign-in screen labels it as local-only.
 
-| Role | Name | Email / Identifier | Bureau | Scope & Permissions |
-| :--- | :--- | :--- | :--- | :--- |
-| **Complainant** | Ananya Rao | `ananya.demo@example.test` | None | File complaints, track own complaints, view public timeline, respond to information requests |
-| **Complainant** | Rohan Das | `rohan.demo@example.test` | None | File complaints, track own complaints, isolated from Ananya's cases |
-| **Official** | Kavita Menon | `kavita.official@example.test` | None | Inspect assigned complaints, advance case lifecycle status, add internal notes or public updates |
-| **Admin** | Devika Sharma | `devika.admin@example.test` | None | Full system dashboard, user management, institution management, audit logs, assignment override |
-| **Bureau Officer** | Amit Kulkarni | `amit.pgrc@example.test` | PGRC | Public Grievance Redressal Cell queue, bureau assignments, inter-bureau transfer, overlap review |
-| **Bureau Officer** | Neha Iyer | `neha.rb@example.test` | Regulation Bureau | Regulation Bureau queue, inter-bureau coordination, overlap review |
+All seeded accounts use the development password **`AcicsPassword#2026`**.
+
+| Status | Role(s) | Name | Email |
+| :--- | :--- | :--- | :--- |
+| ACTIVE | Complainant | Ananya Rao | `ananya.demo@example.test` |
+| ACTIVE | Complainant | Rohan Das | `rohan.demo@example.test` |
+| ACTIVE | Official | Kavita Menon | `kavita.official@example.test` |
+| ACTIVE | Admin | Devika Sharma | `devika.admin@example.test` |
+| ACTIVE | Bureau Officer (PGRC) | Amit Kulkarni | `amit.pgrc@example.test` |
+| ACTIVE | Bureau Officer (Regulation) | Neha Iyer | `neha.rb@example.test` |
+| ACTIVE | Complainant + Official | Priya Verma | `priya.multirole@example.test` |
+| PENDING_APPROVAL | — | Suresh Nair | `suresh.pending@example.test` |
+| SUSPENDED | Official | Meera Joshi | `meera.suspended@example.test` |
+
+The pending and suspended accounts are seeded deliberately so the denial paths are observable: sign-in returns `ACCOUNT_PENDING_APPROVAL` / `ACCOUNT_SUSPENDED` instead of a session.
+
+### Portal access flow
+
+1. Choose a portal (Complainant, Official / Case Officer, Administrator, Bureau Coordination). The choice is a request, not a grant.
+2. Sign in.
+3. Eligibility is evaluated server-side and shown step by step.
+4. Access is either granted or denied with an explicit reason code.
+
+Only accounts with the matching role and `ACTIVE` status can enter a portal. Multi-role accounts can switch portals from the sidebar; every switch is re-validated by the server.
+
+### Account requests and approval
+
+A faculty member, teacher, head of department, principal or other authorised staff member can request Complainant access from the sign-in screen. The request is stored as `PENDING_APPROVAL` with no role. An administrator approves it from **Administration → Users**, which assigns the role and writes an audit entry. Privileged roles (`OFFICIAL`, `ADMIN`, `BUREAU_OFFICER`) cannot be self-assigned.
 
 ---
 
 ## Key Features & Verified Workflows
+
+0. **Portal access and eligibility**:
+   - Four-step public flow: select portal → sign in → verify eligibility → allow/deny.
+   - Server-side eligibility from account status, assigned roles and bureau assignment; the browser can request a portal but never grant one.
+   - Explicit denial codes (`ACCOUNT_PENDING_APPROVAL`, `ACCOUNT_SUSPENDED`, `PORTAL_NOT_AUTHORIZED`, `BUREAU_NOT_ASSIGNED`, …) surfaced as human-readable guidance.
+   - Account-request onboarding for teaching and institutional staff; administrator approval required.
+   - Administrator user management with approve/reject/suspend/reactivate, multi-role assignment, generated one-time initial passwords, and audit logging.
+   - Google OAuth wiring is in place and fails safely (`501`, no session) until credentials are configured; see [ARCHITECTURE_AUDIT.md](ARCHITECTURE_AUDIT.md).
 
 1. **Complainant Portal**:
    - Multi-step complaint intake with real-time field validation.
@@ -95,24 +123,34 @@ When running on `localhost`, ACICS enables development demo identities stored in
 - **Backend**: Cloudflare Workers, Hono Web Framework, D1 SQLite database binding (`DB`).
 - **Storage**: Local Miniflare D1 emulation configured in `wrangler.jsonc`.
 - **Database Seeding**: On first run, `ensureAcics(db)` initializes schemas and seeds:
-  - 6 Synthetic Demo Users
-  - 10 Institutions
-  - 22 Complaint records
-  - 3 Bureaus
+  - 9 accounts (7 active demo identities, 1 pending approval, 1 suspended) and 9 role assignments
+  - 10 Institutions, 22 Complaint records, 3 Bureaus
   - Demonstration audit logs and notifications
 
 ### Resetting Local Database
-To clear and re-initialize the local database:
+Local D1 state lives in `.wrangler/state/v3/d1`. If it becomes unreadable or read-only (for example after switching Miniflare/workerd versions), stop the dev server, back the directory up, then remove it:
+
 ```sh
-# Delete local Miniflare D1 state
-rm -rf .wrangler/state/v3/d1
+# 1. Stop `bun run dev`
+# 2. Back up the generated state (reversible)
+mv .wrangler/state/v3/d1/miniflare-D1DatabaseObject ~/acics-d1-backup
+# 3. Restart
+bun run dev
 ```
-On the next request, the database will be freshly seeded with synthetic demo records.
+
+The next request recreates and reseeds the database with synthetic records.
+
+### Troubleshooting `SQLITE_READONLY`
+
+A `D1_ERROR: attempt to write a readonly database` on login means the local Miniflare database file is stale or was left locked by a previous process. Stop the dev server, apply the backup-and-remove procedure above, and restart. No source change is involved; production D1 is unaffected.
 
 ---
 
 ## Security Architecture
 
+- **Server-side eligibility**: every `/api/acics/*` route passes through the authorization gate (`loadAccount` → `canAccessPortal` → `resolveActiveRole`). The `x-acics-portal` header can only narrow a session to a role the account already holds.
+- **Account lifecycle**: `PENDING_VERIFICATION`, `PENDING_APPROVAL`, `ACTIVE`, `SUSPENDED`, `REJECTED`; only `ACTIVE` accounts can hold sessions.
+- **Sessions**: HMAC-signed `acics_session` cookie backed by `acics_sessions`; PBKDF2-SHA256 passwords (100k iterations); lockout after repeated failures.
 - **Zero-Trust Role Enforcement**: All protected routes verify user identity and role on the server; client-side parameters are never trusted.
 - **Data Isolation**: Complainants can only read and mutate their own complaints. Officers cannot view or mutate cases outside their assigned bureau/jurisdiction.
 - **Cross-Site Request Forgery (CSRF) Protection**: Same-origin enforcement (`isSameOriginRequest`) blocks cross-origin mutations.
@@ -129,10 +167,26 @@ Run the full automated test suite with:
 bun test
 ```
 
+Current result: **56 passing, 0 failing**.
+
 Test coverage includes:
 - **D1 Mock & Seed**: Verification of schema creation and synthetic dataset counts.
 - **Authentication & Sessions**: Health checks, mode discovery, cookie issuance, unauthorized access rejection.
+- **Portal eligibility**: portal selection never grants access, header enforcement on protected routes, unknown portal rejection, multi-role portal access, pending/suspended sign-in blocks.
+- **Onboarding**: public onboarding options, privileged self-assignment refusal, account request → administrator approval → sign-in → audit trail.
+- **Administration**: user directory, provisioning, role/status edits, self-role-removal prevention, production demo sign-in disabled.
 - **Complainant Lifecycle**: Intake validation, persistence, case isolation, response flow.
 - **Official & Bureau Workflows**: Status transitions, forbidden transition rejection (409), note visibility, case assignment, bureau transfer.
 - **Administrator Capabilities**: User management, institution creation, self-deactivation prevention, audit logging.
 - **Security & Integrity**: SQL injection attack resilience, XSS boundaries, CSRF/origin verification.
+
+### Manual verification
+
+Browser automation was unavailable in the build environment, so verify the UI manually:
+
+1. `bun run dev`, open `http://localhost:5173`.
+2. Select **Complainant Portal** → sign in as `ananya.demo@example.test` / `AcicsPassword#2026` → eligibility checklist → portal opens.
+3. Sign out, select **Administrator Portal** with the same complainant credentials → denial screen with `PORTAL_NOT_AUTHORIZED`.
+4. Sign in as `devika.admin@example.test` → **Users** → approve the pending request from Suresh Nair.
+5. Sign in as `priya.multirole@example.test` → switch between Complainant and Official from the sidebar.
+6. Try `meera.suspended@example.test` → suspended denial; try `suresh.pending@example.test` before approval → pending denial.

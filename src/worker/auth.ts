@@ -21,6 +21,8 @@ export function isLoopback(request: Request): boolean {
 
 export function authMode(env: Env, request: Request): 'freebuff' | 'development' | 'off' {
   if (env.FREEBUFF_CLIENT_ID) return 'freebuff'
+  // Production deployments must never fall back to synthetic loopback identities.
+  if ((env.APP_ENV || '').toLowerCase() === 'production') return 'off'
   return isLoopback(request) ? 'development' : 'off'
 }
 
@@ -47,6 +49,17 @@ export function getAuth(env: Env, request: Request): FreebuffAuth | null {
 
 import { verifySessionToken } from './crypto'
 
+const DEV_SESSION_SECRET = 'acics_dev_session_secret_key_32bytes_min'
+
+/**
+ * Sessions need a real secret in production. Returning '' makes callers fail
+ * closed instead of silently signing tokens with a public constant.
+ */
+export function sessionSecret(env: Env): string {
+  if (env.SESSION_SECRET) return env.SESSION_SECRET
+  return (env.APP_ENV || '').toLowerCase() === 'production' ? '' : DEV_SESSION_SECRET
+}
+
 export async function currentUser(env: Env, request: Request, db?: D1Database): Promise<FreebuffUser | null> {
   const auth = getAuth(env, request)
   if (auth) return auth.getUser(request)
@@ -63,16 +76,18 @@ export async function currentUser(env: Env, request: Request, db?: D1Database): 
   const sessionToken = cookies['acics_session']
   const activeDb = db || env.DB
   if (sessionToken && activeDb) {
-    const secret = env.SESSION_SECRET || 'acics_dev_session_secret_key_32bytes_min'
-    const verified = await verifySessionToken(sessionToken, secret)
+    const secret = sessionSecret(env)
+    const verified = secret ? await verifySessionToken(sessionToken, secret) : null
     if (verified) {
       try {
+        // Account status is evaluated by the authorization layer so suspended
+        // and pending accounts receive an explicit 403 instead of "sign in".
         const sessionRow = await activeDb
           .prepare(
-            `SELECT u.sub, u.full_name, u.email, u.role, u.active 
-             FROM acics_sessions s 
-             JOIN acics_users u ON u.sub = s.user_sub 
-             WHERE s.id = ? AND s.expires_at > ? AND u.active = 1`
+            `SELECT u.sub, u.full_name, u.email
+             FROM acics_sessions s
+             JOIN acics_users u ON u.sub = s.user_sub
+             WHERE s.id = ? AND s.expires_at > ?`,
           )
           .bind(verified.sessionId, Date.now())
           .first<any>()

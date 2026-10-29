@@ -1,39 +1,44 @@
 @import 'tailwindcss';
 @import '@fontsource-variable/inter';
 
-/* Design tokens. Everything rounded is a squircle (global rule below), so
-   radii run one step larger than a plain border-radius would. */
+/* Design tokens. Government-of-India inspired: navy structure, saffron accent
+   line, restrained surfaces. Everything rounded is a squircle (global rule
+   below), so radii run one step larger than a plain border-radius would. */
 @theme {
   --font-sans: 'Inter Variable', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
 
-  --color-bg: #f4f6f8;
+  --color-bg: #f3f6f9;
   --color-surface: #ffffff;
-  --color-surface-2: #f1f4f6;
-  --color-raised: #e9eef2;
-  --color-line: #dce2e8;
-  --color-line-strong: #cbd4dd;
-  --color-fg: #263445;
-  --color-muted: #687586;
-  --color-faint: #8290a0;
-  --color-accent: #315f85;
-  --color-accent-soft: #eaf0f5;
-  --color-success: #277a61;
-  --color-success-soft: #e7f3ef;
-  --color-warning: #966715;
-  --color-warning-soft: #faf1dc;
-  --color-danger: #a84438;
-  --color-danger-soft: #f9ece9;
-  --color-info: #315f85;
-  --color-info-soft: #eaf0f5;
+  --color-surface-2: #eef2f6;
+  --color-raised: #e3eaf1;
+  --color-line: #d5dde5;
+  --color-line-strong: #bcc8d4;
+  --color-fg: #1f2937;
+  --color-muted: #5b6573;
+  --color-faint: #78828f;
+  --color-accent: #163a5f;
+  --color-accent-soft: #e8eef4;
+  --color-navy: #163a5f;
+  --color-navy-deep: #102a43;
+  --color-saffron: #e68a24;
+  --color-saffron-soft: #fdf1e2;
+  --color-success: #237a4b;
+  --color-success-soft: #e7f3ed;
+  --color-warning: #9a5b0b;
+  --color-warning-soft: #fdf1e2;
+  --color-danger: #b42318;
+  --color-danger-soft: #fbeae8;
+  --color-info: #163a5f;
+  --color-info-soft: #e8eef4;
 
-  --radius-control: 8px;
-  --radius-card: 10px;
-  --radius-dialog: 12px;
-  --radius-tile: 10px;
+  --radius-control: 6px;
+  --radius-card: 8px;
+  --radius-dialog: 10px;
+  --radius-tile: 6px;
 
-  --shadow-card: 0 1px 2px rgb(20 20 24 / 0.04), 0 0 0 1px rgb(20 20 24 / 0.04);
-  --shadow-pop: 0 0 0 1px rgb(20 20 24 / 0.06), 0 12px 40px -12px rgb(20 20 24 / 0.25);
-  --shadow-dialog: 0 0 0 1px rgb(20 20 24 / 0.06), 0 30px 80px -20px rgb(20 20 24 / 0.35);
+  --shadow-card: 0 1px 2px rgb(16 42 67 / 0.05), 0 0 0 1px rgb(16 42 67 / 0.04);
+  --shadow-pop: 0 0 0 1px rgb(16 42 67 / 0.07), 0 12px 40px -12px rgb(16 42 67 / 0.25);
+  --shadow-dialog: 0 0 0 1px rgb(16 42 67 / 0.07), 0 30px 80px -20px rgb(16 42 67 / 0.35);
 }
 
 @layer base {
