@@ -231,9 +231,9 @@ export async function ensureAcics(db: D1Database, env?: Env) {
 
 const SYNTHETIC_SUBS = new Set([...DEMO_USERS.map((user) => user.sub), ...PENDING_USERS.map((user) => user.sub)])
 
-/** True for the clearly-labelled synthetic identities used by local demos and tests. */
+/** True for the clearly-labelled synthetic identities used by local demos, development access, and tests. */
 export function isSyntheticIdentity(sub: string): boolean {
-  return SYNTHETIC_SUBS.has(sub)
+  return SYNTHETIC_SUBS.has(sub) || sub.startsWith('dev-')
 }
 
 const bootstrapped = new WeakSet<object>()

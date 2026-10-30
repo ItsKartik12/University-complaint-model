@@ -1,0 +1,22 @@
+# Backend (Cloudflare Worker) local variables — server-only, never committed.
+# Wrangler and Miniflare read `.dev.vars` from the repository root, so copy this
+# file there as `.dev.vars` (it is gitignored). Placeholders only.
+APP_ENV=development
+APP_ORIGIN=http://localhost:5173
+SESSION_SECRET=replace_with_a_long_random_secret_at_least_32_characters
+
+# Optional enterprise OIDC identity provider. When unset, local development
+# access is available on loopback origins only. Never available in production.
+FREEBUFF_CLIENT_ID=
+FREEBUFF_ISSUER=https://freebuff.com/oidc
+
+# Google OAuth integration (configure when real credentials are available).
+GOOGLE_CLIENT_ID=
+GOOGLE_CLIENT_SECRET=
+GOOGLE_CALLBACK_URL=http://localhost:5173/api/auth/google/callback
+
+# First-administrator bootstrap (optional). There is no administrator
+# registration endpoint. Set once, then remove the password.
+# ACICS_BOOTSTRAP_ADMIN_EMAIL=you@institution.ac.in
+# ACICS_BOOTSTRAP_ADMIN_NAME="Your Name"
+# ACICS_BOOTSTRAP_ADMIN_PASSWORD="a-strong-password-at-least-12-chars"

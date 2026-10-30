@@ -1,7 +1,7 @@
 # ACICS — Architecture Audit & Access-Control Specification
 
 **Project:** AICTE Complaint Intelligence and Coordination System (SIH26264)
-**Last verified:** 2026-10-29 (`bun test` 56/56, `bun run typecheck` clean, `bun run build` clean, browser audit 57/57, 19-section live API suite)
+**Last verified:** 2026-10-30 (`bun test` 68/68 with 411 assertions, `bun run typecheck` clean, `bun run build` clean, browser UI audit 43/43, route sweep 39/39, live API suite 28/28). Route and API evidence lives in [docs/ROUTE_AUDIT.md](docs/ROUTE_AUDIT.md) and [docs/API_AUDIT.md](docs/API_AUDIT.md).
 
 ---
 
@@ -18,21 +18,24 @@ ACICS runs on a **Cloudflare Workers unified full-stack architecture** with `@cl
 
 ```
 src/
-├── app/            # Presentation layer (React SPA)
+├── frontend/       # Presentation layer (React SPA)
 │   ├── components/ # Reusable primitives (Button, Card, Drawer, Select…)
 │   ├── lib/api.ts  # Typed HTTP client, portal header, auth hooks
 │   ├── pages/
 │   │   ├── PortalAccess.tsx  # Public 4-step portal access flow
-│   │   └── Acics.tsx         # Authenticated role workspaces
-│   └── App.tsx     # Gate: loading / signed-in / access flow / held / error
+│   │   └── Acics.tsx         # Authenticated role workspaces + hash router
+│   ├── App.tsx     # Gate: loading / signed-in / access flow / held / error
+│   └── main.tsx    # React entry loaded by index.html
 ├── shared/types.ts # Shared domain contracts
-└── worker/         # Backend layer (Hono on Cloudflare Workers)
-    ├── index.ts         # Auth routes, app wiring
+└── backend/        # Backend layer (Hono on Cloudflare Workers)
+    ├── index.ts         # Auth routes, dev session/seed, app wiring
     ├── auth.ts          # Session tokens, password hashing, mode gating
     ├── authorization.ts # Central authorization service (single source of truth)
     ├── acics.ts         # ACICS schema, seed, domain routes, admin APIs
     └── routes/          # Legacy CRM routes (isolated)
 ```
+
+`dev:frontend` and `dev:backend` are aliases of the single unified server; D1 is only reachable as the worker's `DB` binding.
 
 The frontend never decides eligibility. It renders what `/api/auth/me`, `/api/auth/portal-access` and `/api/acics/*` return.
 
@@ -44,7 +47,7 @@ The frontend never decides eligibility. It renders what `/api/auth/me`, `/api/au
 |---|---|---|
 | **Google OAuth** | `GOOGLE_CLIENT_ID` + `GOOGLE_CLIENT_SECRET` set | `/api/auth/google` → Google → `/api/auth/google/callback`; requires an existing linked account. Unconfigured ⇒ `501`, no session issued. |
 | **Freebuff OIDC** | `FREEBUFF_CLIENT_ID` set | Upstream OIDC session verification. |
-| **Development** | loopback request, no IdP configured, `APP_ENV` ≠ production | Email/password accounts seeded in D1. Synthetic identities are never seeded or accepted when `APP_ENV=production`. |
+| **Development** | loopback request, no IdP configured, `APP_ENV` ≠ production | Email/password seeded accounts **and** a labelled synthetic `/api/auth/dev-session` that accepts any non-empty ID and grants all four roles for interface exploration. Mock authentication and seeding are refused with `403` in production. |
 | **Disabled** | `APP_ENV=production` with no IdP | `authMode()` returns `off`; synthetic/demo sign-in is unreachable. |
 
 - Sessions: `acics_session` cookie (`sessionId.expiresAt.HMAC-SHA256`), `HttpOnly`, `SameSite=Lax`, `Secure` on HTTPS, backed by `acics_sessions`.
@@ -81,7 +84,7 @@ Only `ACTIVE` accounts can create sessions or call protected routes.
 - `acics_account_requests` — onboarding requests with requested role, institution and designation.
 - `acics_institutions`, `acics_bureaus`, `acics_complaints`, `acics_actions`, `acics_overlaps`, `acics_notifications`, `acics_attachments` — complaint domain, unchanged.
 
-### Central service (`src/worker/authorization.ts`)
+### Central service (`src/backend/authorization.ts`)
 
 `loadAccount(db, sub)` → `canAccessPortal(account, portal)` → `resolveActiveRole(account, request)`.
 
@@ -124,10 +127,10 @@ Without `--remote` the CLI only prints environment-bootstrap instructions; it ne
 
 ## 4. Login and Portal Experience
 
-Four-step flow in `src/app/pages/PortalAccess.tsx`:
+Four-step flow in `src/frontend/pages/PortalAccess.tsx`:
 
 1. **Select portal** — four cards (Complainant, Official / Case Officer, Administrator, Bureau Coordination) with eligibility notes; selecting is a request, never a grant.
-2. **Sign in** — email/password with show/hide, busy state (spinner plus "Verifying credentials…" via `aria-busy`), inline errors, and a Google entry point that shows an explicit "Not configured" notice until credentials exist. No demo-account picker or account list is rendered; development credentials live in the README.
+2. **Sign in** — in development, any non-empty user ID or email plus an optional display name opens a synthetic, clearly labelled `LOCAL DEVELOPMENT MODE` session with all four roles; no password is required. Real email/password and Google paths remain available. No demo-account picker or account list is rendered. The Google entry point shows an explicit "Not configured" notice until credentials exist instead of attempting a failing redirect.
 3. **Verify eligibility** — visible checklist driven by the server decision.
 4. **Allow or deny** — granted: enter the workspace; denied: explicit code, account status, held roles and next action (request access / contact administrator / sign out).
 
@@ -146,13 +149,13 @@ Multi-role accounts get a portal switcher in the sidebar; the choice is stored a
 | Bureau officer | Cases assigned to their bureau; overlap review |
 | Administrator | System-wide directory, audit, configuration |
 
-Enforced in `src/worker/acics.ts` query construction, not in the UI.
+Enforced in `src/backend/acics.ts` query construction, not in the UI.
 
 ---
 
 ## 6. Visual System
 
-Government-style tokens in `src/styles.css`: navy `#163A5F`, dark navy `#102A43`, saffron `#E68A24`, green `#237A4B`, background `#F3F6F9`, surface `#FFFFFF`, text `#1F2937`, muted `#5B6573`, border `#D5DDE5`, error `#B42318`.
+Government-style tokens in `src/frontend/styles.css`: navy `#163A5F`, dark navy `#102A43`, saffron `#E68A24`, green `#237A4B`, background `#F3F6F9`, surface `#FFFFFF`, text `#1F2937`, muted `#5B6573`, border `#D5DDE5`, error `#B42318`.
 
 - Formal, restrained layout with a saffron rule on the masthead; no imitation emblems or seals.
 - Shared primitives (Card, Button, Badge, Drawer, Select, Field) and token-only colours.
@@ -164,18 +167,20 @@ Government-style tokens in `src/styles.css`: navy `#163A5F`, dark navy `#102A43`
 
 | Check | Result |
 |---|---|
-| `bun test` | **56 pass, 0 fail** (250 assertions, 2 files, 3.6 s) |
-| `bun run typecheck` | clean |
-| `bun run build` | success — worker 261 kB, client JS 501 kB (chunk-size warning only), CSS 48 kB |
-| Live API against `bun run dev` | 19-section lifecycle/authorization suite on a fresh D1: request → pending → approve → sign-in, rejection, suspension/reactivation, multi-role portals, cross-user 403, cross-bureau 403, direct admin-route 403, unauthenticated 401, unknown portal 400, complaint create + re-read, audit-log rows |
-| Browser automation (headless Chrome via CDP) | **57/57 checks pass**, 0 uncaught exceptions, 0 unexpected failed requests; screenshots captured for landing, validation, checklist, all four dashboards, pending denial, portal denial, account request, mobile |
+| `bun test` | **68 pass, 0 fail** (411 assertions, 2 files, 4.58 s) |
+| `bun run typecheck` | clean (exit 0) |
+| `bun run build` | success — worker 265,859 B; client JS 513.13 kB (gzip 153.73 kB); CSS 51.44 kB (gzip 10.18 kB); chunk-size warning only |
+| Live API against `bun run dev` | **28/28 checks** on a fresh D1: unauthenticated 401s, onboarding 200, Google 501, dev-session validation, portal narrowing, complaint create → list → detail → status transition, admin-only 403s, cross-identity isolation, logout invalidation |
+| Browser automation (headless Chrome via CDP) | Core UI **43/43** checks; route sweep **39/39** checks; 0 uncaught exceptions, 0 unexpected failed requests, 0 server errors |
 | Google OAuth | unconfigured path live-verified: `501 GOOGLE_NOT_CONFIGURED`, no `Set-Cookie`; configured path **not tested** (no credentials) |
-| Production fail-safe | code path verified: `APP_ENV=production` without `SESSION_SECRET` returns `500 SESSION_CONFIG_MISSING` and issues no cookie; synthetic identities are rejected at login and not seeded |
+| Production fail-safe | automated with `APP_ENV=production`: dev session `403 DEV_AUTH_DISABLED`, dev seed `403 DEV_SEED_DISABLED`, no demo identities in `/auth/status`, synthetic identities rejected at login. A missing `SESSION_SECRET` returns `500 SESSION_CONFIG_MISSING` and issues no cookie (code path, not re-run as a live production server). |
 
 ### Known limitations
 
-- Local D1 can end up read-only or lose its commit token if the `.wrangler/state` files were written by another process (`bun:sqlite`, `wrangler d1 execute --local`, a crashed workerd) or, in this OneDrive-synced folder, after a plain restart. Reset procedure (move the whole `.wrangler/state/v3/d1` directory) is in README.
+- Local D1 can end up read-only or lose its commit token if the `.wrangler/state` files were written by another process (`bun:sqlite`, `wrangler d1 execute --local`, a crashed workerd) or, in this OneDrive-synced folder, after an abrupt process termination. This was reproduced and recovered during the audit by backing up and moving `.wrangler/state/v3/d1`; the procedure is in README.
 - Live Google OAuth was not exercised; only the unconfigured and configuration-detection paths were tested.
 - First-administrator bootstrap was verified with the environment flow in production mode earlier in the audit; the remote `wrangler d1 execute` path was not run because no remote D1 exists in this environment. There is no HTTP registration endpoint.
+- Administrator dialogs were opened and inspected in the browser but not submitted; their endpoints are covered by automated tests.
+- Staff status transitions were exercised through the live API, not by clicking every action control in the case drawer.
 - Client bundle is a single chunk; code-splitting is a future optimisation, not a functional issue.
 - Browser automation used headless Chrome over CDP (Playwright was unavailable); coverage is behavioural, not pixel-diff based.

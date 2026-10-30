@@ -2,7 +2,7 @@ import { Activity, AlertTriangle, ArrowRight, Bell, Building2, Check, ChevronLef
 import { useState, useEffect } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 
-import { api, setActivePortal } from '../lib/api'
+import { api, setActivePortal, useAuthStatus } from '../lib/api'
 import type { AcicsRole, AuthAccount, PortalKey } from '../lib/api'
 import { Badge, Button, Card, Checkbox, Drawer, EmptyState, Field, Input, PageHeader, Select, Skeleton, Textarea, useToast } from '../components/ui'
 
@@ -19,7 +19,25 @@ const NAV: Array<[string, string, (r: Role) => boolean]> = [
   ['Bureau directory', 'bureau', (r) => r !== 'COMPLAINANT'],
   ['Notifications', 'notifications', () => true],
   ['Audit log', 'audit', (r) => r === 'ADMIN'],
+  ['Profile', 'settings', () => true],
 ]
+const PAGE_KEYS = new Set(NAV.map(([, key]) => key))
+
+type Route = { page: string; entityId: string | null }
+
+function readRoute(): Route {
+  const raw = window.location.hash.replace(/^#\/?/, '')
+  const [path, id] = raw.split('/')
+  const page = PAGE_KEYS.has(path) ? path : 'overview'
+  return { page, entityId: id ? decodeURIComponent(id) : null }
+}
+
+function writeRoute(page: string, entityId?: string | null, mode: 'push' | 'replace' = 'push') {
+  const hash = entityId ? `#/${page}/${encodeURIComponent(entityId)}` : `#/${page}`
+  if (window.location.hash === hash) return
+  if (mode === 'replace') window.history.replaceState({}, '', hash)
+  else window.location.hash = hash
+}
 const STATUSES=['SUBMITTED','UNDER_REVIEW','UNDER_PROCESS','AWAITING_INFORMATION','TRANSFERRED','ESCALATED','RESOLVED','CLOSED','REJECTED']
 const CATEGORIES=['Faculty and staffing','Infrastructure and facilities','Academic quality','Regulatory compliance','Student grievances','Institutional administration','Other']
 const fmt=(stamp:number)=>new Intl.DateTimeFormat('en-IN',{dateStyle:'medium'}).format(new Date(stamp))
@@ -28,9 +46,23 @@ const titleCase=(s:string)=>s.replaceAll('_',' ').toLowerCase().replace(/\b\w/g,
 async function fetchJson<T>(path:string):Promise<T>{return api<T>(`/acics${path}`)}
 
 export function Acics({account,onSwitchPortal,onSignedOut}:{account:AuthAccount;onSwitchPortal:()=>void;onSignedOut:()=>void}){
- const qc=useQueryClient(),active=account as unknown as AcicsUser
- const [page,setPage]=useState('overview'),[query,setQuery]=useState(''),[status,setStatus]=useState(''),[category,setCategory]=useState(''),[pageNo,setPageNo]=useState(1),[selected,setSelected]=useState<string|null>(null),[compose,setCompose]=useState(false),[alertSelected,setAlertSelected]=useState<string|null>(null),[institution,setInstitution]=useState<string|null>(null)
+ const qc=useQueryClient(),active=account as unknown as AcicsUser,{data:authStatus}=useAuthStatus(),devMode=Boolean(authStatus?.devAuthEnabled)
+ const [page,setPage]=useState(()=>readRoute().page),[query,setQuery]=useState(''),[status,setStatus]=useState(''),[category,setCategory]=useState(''),[pageNo,setPageNo]=useState(1),[selected,setSelected]=useState<string|null>(()=>{const r=readRoute();return r.page==='complaints'?r.entityId:null}),[compose,setCompose]=useState(false),[alertSelected,setAlertSelected]=useState<string|null>(()=>{const r=readRoute();return r.page==='overlaps'?r.entityId:null}),[institution,setInstitution]=useState<string|null>(()=>{const r=readRoute();return r.page==='institutions'?r.entityId:null})
  const toast=useToast()
+
+ // The hash is the route: deep links, refresh, and Back all resolve through it.
+ useEffect(() => {
+   if (!window.location.hash) window.history.replaceState({}, '', '#/overview')
+   const sync = () => {
+     const next = readRoute()
+     setPage(next.page)
+     setSelected(next.page === 'complaints' ? next.entityId : null)
+     setAlertSelected(next.page === 'overlaps' ? next.entityId : null)
+     setInstitution(next.page === 'institutions' ? next.entityId : null)
+   }
+   window.addEventListener('hashchange', sync)
+   return () => window.removeEventListener('hashchange', sync)
+ }, [])
 
  useEffect(() => {
    if (active) {
@@ -38,9 +70,25 @@ export function Acics({account,onSwitchPortal,onSignedOut}:{account:AuthAccount;
      if (currentNavItem && !currentNavItem[2](active.role)) {
        setPage('overview')
        setSelected(null)
+       setAlertSelected(null)
+       setInstitution(null)
+       writeRoute('overview', null, 'replace')
      }
    }
  }, [active, page])
+
+ const go=(key:string,entityId:string|null=null)=>{
+   setPage(key)
+   setSelected(key==='complaints'?entityId:null)
+   setAlertSelected(key==='overlaps'?entityId:null)
+   setInstitution(key==='institutions'?entityId:null)
+   writeRoute(key, entityId)
+ }
+
+ // Resolve the visible route during render, not only in an effect, so a page
+ // the current role may not use is never mounted while the hash is corrected.
+ const routeItem=NAV.find(([,key])=>key===page)
+ const visiblePage=routeItem&&routeItem[2](active.role)?page:'overview'
 
  const logout=async()=>{
    try{
@@ -57,36 +105,38 @@ export function Acics({account,onSwitchPortal,onSignedOut}:{account:AuthAccount;
  }
  const switchPortal=async(portal:PortalKey)=>{
    setActivePortal(portal)
+   // Case data is role-scoped. Drop it before the new role renders so a cached
+   // bureau view cannot flash inside a complainant session.
+   qc.removeQueries({predicate:q=>q.queryKey[0]==='acics'})
    await qc.invalidateQueries({queryKey:['auth']})
-   await qc.invalidateQueries({queryKey:['acics']})
    onSwitchPortal()
  }
  return <div className="flex h-full min-h-0 bg-[#f3f6f9] text-[#1f2937]">
   <aside className="hidden w-[245px] shrink-0 flex-col border-r border-[#d5dde5] bg-white md:flex">
-   <div className="flex h-[70px] items-center gap-3 border-b border-[#d5dde5] px-5"><div className="grid size-9 place-items-center rounded-md bg-[#102a43] text-white"><Landmark className="size-5"/></div><div><p className="text-sm font-semibold text-[#102a43]">ACICS</p><p className="text-[10px] tracking-wide text-[#5b6573]">COORDINATION PLATFORM</p></div></div>
+   <div className="flex h-[70px] items-center gap-3 border-b border-[#d5dde5] px-5"><div className="grid size-9 place-items-center rounded-md bg-[#102a43] text-white"><Landmark className="size-5"/></div><div className="min-w-0"><p className="text-sm font-semibold text-[#102a43]">ACICS</p><p className="text-[10px] tracking-wide text-[#5b6573]">COORDINATION PLATFORM</p></div>{devMode&&<span className="ml-auto rounded border border-[#237a4b]/30 bg-[#e7f3ed] px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-[#237a4b]">Dev</span>}</div>
    <div className="border-b border-[#d5dde5] px-4 py-4"><p className="text-[11px] font-semibold uppercase tracking-wider text-[#5b6573]">Workspace</p><div className="mt-2 flex items-center gap-2"><div className="grid size-8 place-items-center rounded bg-[#eef2f6] text-[#163a5f]"><ShieldCheck className="size-4"/></div><div className="min-w-0"><p className="truncate text-xs font-medium">{active.role==='BUREAU_OFFICER'?active.bureau?.name:roleName(active.role)}</p><p className="text-[11px] text-[#5b6573]">{roleName(active.role)}</p></div></div>{active.designation&&<p className="mt-2 truncate text-[11px] text-[#5b6573]">{active.designation}{active.institution?.name?` · ${active.institution.name}`:''}</p>}</div>
-   <nav className="flex-1 px-3 py-4">{NAV.filter(([, , check]) => check(active.role)).map(([label,key])=><button key={key} onClick={()=>{setPage(key);setSelected(null)}} className={`mb-1 flex h-10 w-full items-center gap-3 rounded px-3 text-left text-[13px] ${page===key?'bg-[#e8eef4] font-semibold text-[#102a43]':'text-[#5b6573] hover:bg-[#f3f6f9]'}`}><NavIcon name={key}/>{label}</button>)}</nav>
+   <nav className="flex-1 px-3 py-4">{NAV.filter(([, , check]) => check(active.role)).map(([label,key])=><button key={key} onClick={()=>go(key)} aria-current={visiblePage===key?'page':undefined} className={`mb-1 flex h-10 w-full items-center gap-3 rounded px-3 text-left text-[13px] ${visiblePage===key?'bg-[#e8eef4] font-semibold text-[#102a43]':'text-[#5b6573] hover:bg-[#f3f6f9]'}`}><NavIcon name={key}/>{label}</button>)}</nav>
    {active.roles.length>1&&<div className="border-t border-[#d5dde5] p-3"><p className="px-2 pb-1.5 text-[10px] font-semibold uppercase tracking-wider text-[#5b6573]">Switch portal</p><Select aria-label="Switch portal" value={PORTAL_OF[active.role]} onChange={e=>void switchPortal(e.target.value as PortalKey)}>{active.roles.map(r=><option key={r} value={PORTAL_OF[r]}>{roleName(r)}</option>)}</Select><p className="mt-1.5 px-1 text-[10.5px] leading-snug text-[#5b6573]">Only portals granted to this account are listed.</p></div>}
    <div className="border-t border-[#d5dde5] p-3"><div className="px-2 py-2"><p className="truncate text-xs font-semibold">{active.user.name}</p><p className="truncate text-[11px] text-[#5b6573]">{active.user.email}</p></div><Button className="w-full justify-start" onClick={()=>void logout()}><LogOut/>Sign out</Button></div>
   </aside>
   <main className="min-w-0 flex-1 overflow-y-auto">
-   <header className="sticky top-0 z-10 flex min-h-[62px] items-center justify-between border-b border-t-[3px] border-[#d5dde5] border-t-[#e68a24] bg-white px-4 sm:px-7"><div><p className="text-[11px] text-[#5b6573]">AICTE / {roleName(active.role)} / <span className="text-[#1f2937]">{pageTitle(page)}</span></p><p className="mt-0.5 text-sm font-semibold text-[#102a43]">{pageTitle(page)}</p></div><div className="flex items-center gap-2"><Badge tone="accent">{roleName(active.role)}</Badge><Button size="icon-sm" aria-label="Notifications" onClick={()=>setPage('notifications')}><Bell/></Button><Button size="icon-sm" aria-label="Sign out" className="md:hidden" onClick={()=>void logout()}><LogOut/></Button><span className="hidden size-8 items-center justify-center rounded-full bg-[#163a5f] text-xs font-semibold text-white sm:flex">{initials(active.user.name)}</span></div></header>
-   <nav aria-label="Primary navigation" className="sticky top-[62px] z-[9] flex gap-1 overflow-x-auto border-b border-[#d5dde5] bg-white px-3 py-2 md:hidden">{NAV.filter(([, , check]) => check(active.role)).map(([label,key])=><button key={key} onClick={()=>setPage(key)} className={`shrink-0 rounded px-3 py-2 text-xs ${page===key?'bg-[#e8eef4] font-semibold text-[#102a43]':'text-[#5b6573]'}`}>{label}</button>)}</nav>
+   <header className="sticky top-0 z-10 flex min-h-[62px] items-center justify-between border-b border-t-[3px] border-[#d5dde5] border-t-[#e68a24] bg-white px-4 sm:px-7"><div><p className="text-[11px] text-[#5b6573]">AICTE / {roleName(active.role)} / <span className="text-[#1f2937]">{pageTitle(visiblePage)}</span></p><p className="mt-0.5 text-sm font-semibold text-[#102a43]">{pageTitle(visiblePage)}</p></div><div className="flex items-center gap-2">{devMode&&<Badge tone="success" className="hidden sm:inline-flex">Local development</Badge>}<Badge tone="accent">{roleName(active.role)}</Badge>{active.roles.length>1&&<Select aria-label="Switch portal" className="w-36 md:hidden" value={PORTAL_OF[active.role]} onChange={e=>void switchPortal(e.target.value as PortalKey)}>{active.roles.map(r=><option key={r} value={PORTAL_OF[r]}>{roleName(r)}</option>)}</Select>}<Button size="icon-sm" aria-label="Notifications" onClick={()=>go('notifications')}><Bell/></Button><Button size="icon-sm" aria-label="Sign out" className="md:hidden" onClick={()=>void logout()}><LogOut/></Button><span className="hidden size-8 items-center justify-center rounded-full bg-[#163a5f] text-xs font-semibold text-white sm:flex">{initials(active.user.name)}</span></div></header>
+   <nav aria-label="Primary navigation" className="sticky top-[62px] z-[9] flex gap-1 overflow-x-auto border-b border-[#d5dde5] bg-white px-3 py-2 md:hidden">{NAV.filter(([, , check]) => check(active.role)).map(([label,key])=><button key={key} onClick={()=>go(key)} aria-current={visiblePage===key?'page':undefined} className={`shrink-0 rounded px-3 py-2 text-xs ${visiblePage===key?'bg-[#e8eef4] font-semibold text-[#102a43]':'text-[#5b6573]'}`}>{label}</button>)}</nav>
    <div className="mx-auto max-w-[1380px] p-4 sm:p-7">
-    {page==='overview'&&<Overview user={active} go={setPage}/>}
-    {page==='complaints'&&<ComplaintQueue user={active} query={query} setQuery={setQuery} status={status} setStatus={setStatus} category={category} setCategory={setCategory} pageNo={pageNo} setPageNo={setPageNo} onOpen={setSelected} onNew={()=>setCompose(true)}/>}
-    {page==='overlaps'&&<Overlaps onSelect={setAlertSelected}/>}
-    {page==='institutions'&&<Institutions onOpen={setInstitution} query={query} setQuery={setQuery} role={active.role} toast={toast}/>}
-    {page==='users'&&<AdminUsers toast={toast}/>}
-    {page==='notifications'&&<Notifications toast={toast}/>}
-    {page==='audit'&&<Audit onCase={setSelected}/>}
-    {page==='settings'&&<Settings user={active}/>}
-    {page==='bureau'&&<Bureaus/>}
+    {visiblePage==='overview'&&<Overview user={active} go={go}/>}
+    {visiblePage==='complaints'&&<ComplaintQueue user={active} query={query} setQuery={setQuery} status={status} setStatus={setStatus} category={category} setCategory={setCategory} pageNo={pageNo} setPageNo={setPageNo} onOpen={(id)=>go('complaints',id)} onNew={()=>setCompose(true)}/>}
+    {visiblePage==='overlaps'&&<Overlaps onSelect={(id)=>go('overlaps',id)}/>}
+    {visiblePage==='institutions'&&<Institutions onOpen={(id)=>go('institutions',id)} query={query} setQuery={setQuery} role={active.role} toast={toast}/>}
+    {visiblePage==='users'&&<AdminUsers toast={toast}/>}
+    {visiblePage==='notifications'&&<Notifications toast={toast}/>}
+    {visiblePage==='audit'&&<Audit onCase={(id)=>go('complaints',id)}/>}
+    {visiblePage==='settings'&&<Settings user={active}/>}
+    {visiblePage==='bureau'&&<Bureaus/>}
    </div>
   </main>
-  {selected&&<CaseDrawer id={selected} user={active} onClose={()=>setSelected(null)} toast={toast}/>}
-  {alertSelected&&<OverlapDrawer id={alertSelected} onClose={()=>setAlertSelected(null)} toast={toast}/>}
-  {institution&&<InstitutionDrawer id={institution} onClose={()=>setInstitution(null)} onCase={setSelected}/>}
+  {visiblePage==='complaints'&&selected&&<CaseDrawer id={selected} user={active} onClose={()=>go('complaints')} toast={toast}/>}
+  {visiblePage==='overlaps'&&alertSelected&&<OverlapDrawer id={alertSelected} onClose={()=>go('overlaps')} toast={toast}/>}
+  {visiblePage==='institutions'&&institution&&<InstitutionDrawer id={institution} onClose={()=>go('institutions')} onCase={(id)=>go('complaints',id)}/>}
   {compose&&<SubmitForm onClose={()=>setCompose(false)} toast={toast}/>}
  </div>
 }
@@ -100,7 +150,7 @@ function Stat({label,value,hint}:{label:string;value:string|number;hint?:string}
 function Overview({user,go}:{user:AcicsUser;go:(p:string)=>void}){const {data,isLoading,error}=useAcics<any>('/analytics'),complainant=user.role==='COMPLAINANT',{data:cases}=useAcics<{items:Case[]}>('/complaints?pageSize=5'),stats=complainant?[['My complaints',data?.totals?.total??0,'Submitted by you'],['In review',cases?.items.filter(c=>['UNDER_REVIEW','UNDER_PROCESS'].includes(c.status)).length??0,'Being assessed'],['Need information',cases?.items.filter(c=>c.status==='AWAITING_INFORMATION').length??0,'Response may be needed'],['Resolved',data?.totals?.resolved??0,'Completed cases']]:[['Total cases',data?.totals?.total??0,'Within your authorized scope'],['Open cases',data?.totals?.open??0,'Require further action'],['Overdue',data?.totals?.overdue??0,'Demonstration rule'],['Overlap reviews',data?.pendingOverlapReviews??0,'Pending staff review']];return <><PageHeader title={complainant?`Welcome, ${user.user.name.split(' ')[0]}`:`${user.bureau?.code||roleName(user.role)} overview`} subtitle={complainant?'Your complaints and their latest progress.':'Current workload from persisted synthetic demonstration records.'} actions={complainant?<Button variant="primary" onClick={()=>go('complaints')}>My complaints <ArrowRight/></Button>:<Button onClick={()=>go('complaints')}>Open case queue <ArrowRight/></Button>}/><div className="mt-3 flex items-center gap-2 rounded border border-[#d5dde5] bg-white px-3 py-2 text-[11px] text-[#5b6573]"><span className="size-2 rounded-full bg-[#237a4b]"/>Synthetic demonstration data · prototype deadlines are not official AICTE service standards.</div>{error&&<ErrorBox message={(error as Error).message}/>}<div className="mt-5 grid grid-cols-2 gap-3 lg:grid-cols-4">{stats.map(([label,value,hint])=>isLoading?<Skeleton key={label} className="h-28"/>:<Stat key={label} label={label as string} value={value as number} hint={hint as string}/>)}</div><div className="mt-4 grid gap-4 lg:grid-cols-3"><Card className="border border-[#d5dde5] p-5 shadow-none lg:col-span-2"><div className="flex items-center justify-between"><div><h2 className="text-sm font-semibold">{complainant?'Recent complaints':'Case status distribution'}</h2><p className="mt-1 text-xs text-[#5b6573]">{complainant?'Your latest submissions':'Current authorized case scope'}</p></div>{!complainant&&<Button size="sm" onClick={()=>go('complaints')}>Case queue</Button>}</div>{complainant?<CaseTable rows={cases?.items||[]} onOpen={()=>go('complaints')}/>:<div className="mt-5 space-y-3">{(data?.statuses||[]).map((s:any)=>{const pct=Math.round(s.count/Math.max(1,Number(data?.totals?.total||1))*100);return <div key={s.status}><div className="mb-1 flex justify-between text-xs"><span>{titleCase(s.status)}</span><span className="tabular-nums text-[#5b6573]">{s.count}</span></div><div className="h-2 overflow-hidden rounded bg-[#e8edf2]"><div className="h-full bg-[#163a5f]" style={{width:`${pct}%`}}/></div></div>})}</div>}</Card><Card className="border border-[#d5dde5] p-5 shadow-none"><h2 className="text-sm font-semibold">{user.role==='ADMIN'?'System scope':'Actions'}</h2>{user.role==='ADMIN'?<div className="mt-4 grid grid-cols-2 gap-2"><MiniStat label="Active users" value={data?.users??0}/><MiniStat label="Institutions" value={data?.institutions??0}/><MiniStat label="Open cases" value={data?.totals?.open??0}/><MiniStat label="Pending review" value={data?.pendingOverlapReviews??0}/></div>:<div className="mt-4 flex flex-col gap-2"><Button className="justify-start" onClick={()=>go('overlaps')}><AlertTriangle/>Review overlap alerts</Button><Button className="justify-start" onClick={()=>go('institutions')}><Building2/>Institution profiles</Button><Button className="justify-start" onClick={()=>go('notifications')}><Bell/>Notifications</Button></div>}<p className="mt-5 border-t border-[#d5dde5] pt-3 text-[11px] leading-relaxed text-[#5b6573]">An overlap is decision support, not proof of duplication or legal validity.</p></Card></div><Card className="mt-4 border border-[#d5dde5] p-5 shadow-none"><h2 className="text-sm font-semibold">Recently updated cases</h2><CaseTable rows={cases?.items||[]} onOpen={()=>go('complaints')}/></Card></>}
 function MiniStat({label,value}:{label:string;value:number}){return <div className="rounded bg-[#f3f6f9] p-3"><p className="text-[10px] text-[#5b6573]">{label}</p><p className="mt-1 text-lg font-semibold tabular-nums">{value}</p></div>}
 function ErrorBox({message}:{message:string}){return <div role="alert" className="mt-4 rounded border border-[#f0c4bf] bg-[#fbeae8] p-3 text-xs text-[#b42318]">Unable to load this section: {message}</div>}
-function useAcics<T>(path:string){return useQuery({queryKey:['acics',path],queryFn:()=>fetchJson<T>(path),staleTime:10_000})}
+function useAcics<T>(path:string,enabled=true){return useQuery({queryKey:['acics',path],queryFn:()=>fetchJson<T>(path),staleTime:10_000,enabled})}
 
 function ComplaintQueue({user,query,setQuery,status,setStatus,category,setCategory,pageNo,setPageNo,onOpen,onNew}:{user:AcicsUser;query:string;setQuery:(v:string)=>void;status:string;setStatus:(v:string)=>void;category:string;setCategory:(v:string)=>void;pageNo:number;setPageNo:(v:number)=>void;onOpen:(id:string)=>void;onNew:()=>void}){
  const params=new URLSearchParams({page:String(pageNo),pageSize:'12'});if(query)params.set('q',query);if(status)params.set('status',status);if(category)params.set('category',category)
@@ -124,16 +174,17 @@ function SubmitForm({onClose,toast}:{onClose:()=>void;toast:(m:string,t?:'neutra
 }
 
 function CaseDrawer({id,user,onClose,toast}:{id:string;user:AcicsUser;onClose:()=>void;toast:(m:string,t?:'neutral'|'danger')=>void}){
+  const allowed=user.role!=='COMPLAINANT'
   const {data,isLoading,error}=useAcics<{item:Case;actions:any[];related:any[]}>(`/complaints/${id}`)
-  const {data:bureausData}=useAcics<{items:any[]}>('/bureaus')
-  const {data:officersData}=useAcics<{items:any[]}>('/officers')
+  const {data:bureausData}=useAcics<{items:any[]}>('/bureaus',allowed)
+  const {data:officersData}=useAcics<{items:any[]}>('/officers',allowed)
   const qc=useQueryClient()
   const [remarks,setRemarks]=useState('')
   const [next,setNext]=useState('')
   const [targetBureau,setTargetBureau]=useState('')
   const [assignOfficer,setAssignOfficer]=useState('')
   const [visibility,setVisibility]=useState('INTERNAL')
-  const item=data?.item,allowed=user.role!=='COMPLAINANT'
+  const item=data?.item
   const canTransition=(s:string)=>({SUBMITTED:['UNDER_REVIEW','REJECTED'],UNDER_REVIEW:['UNDER_PROCESS','AWAITING_INFORMATION','TRANSFERRED','ESCALATED','REJECTED'],UNDER_PROCESS:['AWAITING_INFORMATION','TRANSFERRED','ESCALATED','RESOLVED'],AWAITING_INFORMATION:['UNDER_PROCESS','RESOLVED'],TRANSFERRED:['UNDER_REVIEW','UNDER_PROCESS','ESCALATED'],ESCALATED:['UNDER_PROCESS','RESOLVED'],RESOLVED:['CLOSED','UNDER_PROCESS'],CLOSED:[],REJECTED:[]} as any)[s]||[]
   const action=async(path:string,body:any)=>{await api(`/acics${path}`,{method:'POST',json:body});await qc.invalidateQueries({queryKey:['acics']});setRemarks('');toast('Case action recorded')}
   const doAssign=async()=>{
@@ -156,7 +207,7 @@ function CaseDrawer({id,user,onClose,toast}:{id:string;user:AcicsUser;onClose:()
         <p className="mt-2 whitespace-pre-wrap text-sm leading-relaxed text-[#3f4a58]">{item.description}</p>
       </div>
       <div className="grid grid-cols-2 gap-3 rounded border border-[#d5dde5] bg-[#f8fafc] p-3 text-xs">
-        <div><p className="text-[#5b6573]">Institution</p><button className="mt-1 text-left font-semibold text-[#163a5f] underline" onClick={()=>{onClose()}}>{item.institution.name}</button></div>
+        <div><p className="text-[#5b6573]">Institution</p><p className="mt-1 font-semibold text-[#102a43]">{item.institution.name}</p></div>
         <div><p className="text-[#5b6573]">Identifier</p><p className="mt-1 font-medium">{item.institution.officialId}</p></div>
         <div><p className="text-[#5b6573]">Category</p><p className="mt-1">{item.category}</p></div>
         <div><p className="text-[#5b6573]">Assigned bureau</p><p className="mt-1">{item.assignedBureau?.name||'Not disclosed'}</p></div>
@@ -592,7 +643,7 @@ function Notifications({toast}:{toast:(m:string,t?:'neutral'|'danger')=>void}){
 
 function Audit({onCase}:{onCase:(id:string)=>void}){const {data,isLoading,error}=useAcics<{items:any[]}>('/admin/audit-logs');return <><PageHeader title="Audit log" subtitle="Append-only record of case and overlap review actions. Available to administrators."/>{error&&<ErrorBox message={(error as Error).message}/>}<Card className="mt-4 overflow-x-auto border border-[#d5dde5] shadow-none">{isLoading?<Skeleton className="m-4 h-28"/>:<table className="w-full min-w-[760px] text-left text-xs"><thead className="bg-[#f8fafc] text-[#5b6573]"><tr className="h-10 border-b"><th className="px-4">Timestamp</th><th className="px-3">Actor</th><th className="px-3">Action</th><th className="px-3">Case</th><th className="px-3">Outcome / note</th></tr></thead><tbody className="divide-y">{data?.items.map(a=><tr key={a.id} className="h-12"><td className="px-4">{fmt(a.createdAt)}</td><td className="px-3">{a.actor||a.actorId}</td><td className="px-3">{a.actionType.replaceAll('_',' ')}</td><td className="px-3"><button className="text-[#163a5f] underline" onClick={()=>onCase(a.complaintId)}>{a.complaintNumber||a.complaintId}</button></td><td className="max-w-[300px] truncate px-3">{a.newValue||a.remarks||'—'}</td></tr>)}</tbody></table>}</Card></>}
 
-function Settings({user}:{user:AcicsUser}){const {data}=useAcics<any>('/analytics');return <><PageHeader title="Account and prototype settings" subtitle="Identity and data are scoped to this local database. No AICTE integration is configured."/><div className="mt-4 grid gap-4 md:grid-cols-2"><Card className="border border-[#d5dde5] p-5 shadow-none"><h2 className="text-sm font-semibold">Current identity</h2><p className="mt-3 text-sm">{user.user.name}</p><p className="text-xs text-[#5b6573]">{user.user.email}</p><div className="mt-3 flex flex-wrap gap-1.5">{user.roles.map(r=><Badge key={r}>{roleName(r)}</Badge>)}{user.bureau&&<Badge tone="info">{user.bureau.code}</Badge>}</div><dl className="mt-4 space-y-2 border-t border-[#d5dde5] pt-3 text-[12px]"><div className="flex justify-between gap-3"><dt className="text-[#5b6573]">Account status</dt><dd className="font-medium">{user.accountStatus.replaceAll('_',' ').toLowerCase()}</dd></div>{user.designation&&<div className="flex justify-between gap-3"><dt className="text-[#5b6573]">Designation</dt><dd className="text-right font-medium">{user.designation}</dd></div>}{user.institution?.name&&<div className="flex justify-between gap-3"><dt className="text-[#5b6573]">Institution</dt><dd className="text-right font-medium">{user.institution.name}</dd></div>}<div className="flex justify-between gap-3"><dt className="text-[#5b6573]">Identity source</dt><dd className="font-medium">{user.demo?'Local development account':'Institutional sign-in'}</dd></div></dl></Card><Card className="border border-[#d5dde5] p-5 shadow-none"><h2 className="text-sm font-semibold">Prototype policy</h2><ul className="mt-3 list-disc space-y-2 pl-4 text-xs leading-relaxed text-[#5b6573]"><li>Case due dates use an illustrative 30-day default, not an official deadline.</li><li>Overlap detection uses exact synthetic institution IDs and lexical token similarity. No semantic AI model is configured.</li><li>Complaint attachments are not stored; confidential file handling requires a secured storage policy.</li><li>All case text and people in the preloaded dataset are synthetic.</li></ul></Card></div><Card className="mt-4 border border-[#d5dde5] p-5 shadow-none"><h2 className="text-sm font-semibold">System counts</h2><div className="mt-3 grid grid-cols-2 gap-3 md:grid-cols-4"><Stat label="Users" value={data?.users??0}/><Stat label="Institutions" value={data?.institutions??0}/><Stat label="Cases in scope" value={data?.totals?.total??0}/><Stat label="Open cases" value={data?.totals?.open??0}/></div></Card></>}
+function Settings({user}:{user:AcicsUser}){const {data}=useAcics<any>('/analytics');return <><PageHeader title="Account and prototype settings" subtitle="Identity and data are scoped to this local database. No AICTE integration is configured."/><div className="mt-4 grid gap-4 md:grid-cols-2"><Card className="border border-[#d5dde5] p-5 shadow-none"><h2 className="text-sm font-semibold">Current identity</h2><p className="mt-3 text-sm">{user.user.name}</p><p className="text-xs text-[#5b6573]">{user.user.email}</p><div className="mt-3 flex flex-wrap gap-1.5">{user.roles.map(r=><Badge key={r}>{roleName(r)}</Badge>)}{user.bureau&&<Badge tone="info">{user.bureau.code}</Badge>}</div><dl className="mt-4 space-y-2 border-t border-[#d5dde5] pt-3 text-[12px]"><div className="flex justify-between gap-3"><dt className="text-[#5b6573]">Account status</dt><dd className="font-medium">{user.accountStatus.replaceAll('_',' ').toLowerCase()}</dd></div>{user.designation&&<div className="flex justify-between gap-3"><dt className="text-[#5b6573]">Designation</dt><dd className="text-right font-medium">{user.designation}</dd></div>}{user.institution?.name&&<div className="flex justify-between gap-3"><dt className="text-[#5b6573]">Institution</dt><dd className="text-right font-medium">{user.institution.name}</dd></div>}<div className="flex justify-between gap-3"><dt className="text-[#5b6573]">Identity source</dt><dd className="font-medium">{user.user.sub.startsWith('dev-')?'Local development session (synthetic, unverified)':user.demo?'Local development account':'Institutional sign-in'}</dd></div></dl></Card><Card className="border border-[#d5dde5] p-5 shadow-none"><h2 className="text-sm font-semibold">Prototype policy</h2><ul className="mt-3 list-disc space-y-2 pl-4 text-xs leading-relaxed text-[#5b6573]"><li>Case due dates use an illustrative 30-day default, not an official deadline.</li><li>Overlap detection uses exact synthetic institution IDs and lexical token similarity. No semantic AI model is configured.</li><li>Complaint attachments are not stored; confidential file handling requires a secured storage policy.</li><li>All case text and people in the preloaded dataset are synthetic.</li></ul></Card></div><Card className="mt-4 border border-[#d5dde5] p-5 shadow-none"><h2 className="text-sm font-semibold">System counts</h2><div className="mt-3 grid grid-cols-2 gap-3 md:grid-cols-4"><Stat label="Users" value={data?.users??0}/><Stat label="Institutions" value={data?.institutions??0}/><Stat label="Cases in scope" value={data?.totals?.total??0}/><Stat label="Open cases" value={data?.totals?.open??0}/></div></Card></>}
 
 function Bureaus(){const {data,error}=useAcics<{items:any[]}>('/bureaus');return <><PageHeader title="Bureau directory" subtitle="Configured coordinating units and permitted case categories."/>{error&&<ErrorBox message={(error as Error).message}/>}<div className="mt-4 grid gap-3 md:grid-cols-2">{data?.items.map(b=><Card key={b.id} className="border border-[#d5dde5] p-4 shadow-none"><div className="flex items-center justify-between"><div><p className="font-semibold">{b.name}</p><p className="mt-1 text-xs text-[#5b6573]">{b.code} • {b.active?'Active':'Disabled'}</p></div><Badge>{b.caseCount} cases</Badge></div><div className="mt-3 flex flex-wrap gap-1">{b.permittedCategories.map((c:string)=><Badge key={c} tone="neutral">{c}</Badge>)}</div></Card>)}</div></>}
 

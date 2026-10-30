@@ -1,7 +1,9 @@
 import { describe, expect, it, beforeEach } from 'bun:test'
+import { readFileSync, readdirSync, statSync } from 'node:fs'
+import { join } from 'node:path'
 import { createMockD1 } from './d1-mock'
-import { ensureAcics } from '../src/worker/acics'
-import worker from '../src/worker/index'
+import { ensureAcics } from '../src/backend/acics'
+import worker from '../src/backend/index'
 
 function makeEnv(db: any) {
   return {
@@ -874,6 +876,217 @@ describe('ACICS Full System & API Integration Tests', () => {
         {} as any,
       )
       expect(res.status).toBe(403)
+    })
+  })
+
+  describe('Phase 11: Local development access', () => {
+    async function devLogin(body: Record<string, unknown>) {
+      const res = await request('/api/auth/dev-session', { method: 'POST', body })
+      const cookie = res.status === 200 ? res.headers.get('Set-Cookie')!.split(';')[0] : ''
+      return { res, cookie }
+    }
+
+    it('accepts any non-empty user ID and issues a labelled synthetic session', async () => {
+      const { res, cookie } = await devLogin({ identifier: 'kartik@example.org', displayName: 'Kartik' })
+      expect(res.status).toBe(200)
+      const data = await res.json()
+      expect(data.development).toBe(true)
+      expect(data.label).toBe('LOCAL DEVELOPMENT MODE')
+      expect(data.account.roles.sort()).toEqual(['ADMIN', 'BUREAU_OFFICER', 'COMPLAINANT', 'OFFICIAL'])
+      expect(cookie).toContain('acics_session=')
+      expect(String(res.headers.get('Set-Cookie'))).toContain('HttpOnly')
+
+      const me = await request('/api/auth/me', { sessionCookie: cookie })
+      expect(me.status).toBe(200)
+      const account = await me.json()
+      expect(account.email).toBe('kartik@example.org')
+      expect(account.name).toBe('Kartik')
+      expect(account.accountStatus).toBe('ACTIVE')
+    })
+
+    it('gives the development session access to all four portals', async () => {
+      const { cookie } = await devLogin({ identifier: 'portal-tester' })
+      for (const portal of ['complainant', 'official', 'admin', 'bureau']) {
+        const me = await request('/api/auth/me', { sessionCookie: cookie, portal })
+        expect(me.status).toBe(200)
+        expect((await me.json()).activePortal).toBe(portal)
+        const access = await request('/api/auth/portal-access', { method: 'POST', sessionCookie: cookie, body: { portal } })
+        expect(access.status).toBe(200)
+        expect((await access.json()).allowed).toBe(true)
+      }
+    })
+
+    it('rejects blank identifiers without creating a session', async () => {
+      for (const identifier of ['', '   ']) {
+        const { res } = await devLogin({ identifier })
+        expect(res.status).toBe(400)
+        expect((await res.json()).code).toBe('DEV_ID_REQUIRED')
+        expect(res.headers.get('Set-Cookie')).toBeNull()
+      }
+    })
+
+    it('refuses development access when APP_ENV=production', async () => {
+      const res = await worker.fetch(
+        new Request('http://localhost/api/auth/dev-session', {
+          method: 'POST',
+          headers: { Origin: 'http://localhost', 'Content-Type': 'application/json' },
+          body: JSON.stringify({ identifier: 'production-probe' }),
+        }),
+        { ...env, APP_ENV: 'production' } as any,
+        {} as any,
+      )
+      expect(res.status).toBe(403)
+      expect((await res.json()).code).toBe('DEV_AUTH_DISABLED')
+      expect(res.headers.get('Set-Cookie')).toBeNull()
+    })
+
+    it('refuses development access on a non-loopback origin', async () => {
+      const res = await worker.fetch(
+        new Request('https://acics.example.gov.in/api/auth/dev-session', {
+          method: 'POST',
+          headers: { Origin: 'https://acics.example.gov.in', 'Content-Type': 'application/json' },
+          body: JSON.stringify({ identifier: 'remote-probe' }),
+        }),
+        env as any,
+        {} as any,
+      )
+      expect(res.status).toBe(403)
+      expect((await res.json()).code).toBe('DEV_AUTH_DISABLED')
+    })
+
+    it('refuses development access once an identity provider is configured', async () => {
+      const res = await worker.fetch(
+        new Request('http://localhost/api/auth/dev-session', {
+          method: 'POST',
+          headers: { Origin: 'http://localhost', 'Content-Type': 'application/json' },
+          body: JSON.stringify({ identifier: 'oauth-probe' }),
+        }),
+        { ...env, FREEBUFF_CLIENT_ID: 'configured-client' } as any,
+        {} as any,
+      )
+      expect(res.status).toBe(403)
+    })
+
+    it('persists a complaint created through a development session', async () => {
+      const { cookie } = await devLogin({ identifier: 'complaint-author' })
+      const created = await request('/api/acics/complaints', {
+        method: 'POST',
+        sessionCookie: cookie,
+        portal: 'complainant',
+        body: {
+          institutionOfficialId: 'AICTE-DEMO-001',
+          subject: 'Development access persistence check',
+          description: 'This complaint verifies that a development session writes through to the database and can be read back.',
+          category: 'Other',
+          priority: 'LOW',
+        },
+      })
+      expect(created.status).toBe(201)
+      const { item } = await created.json()
+      expect(item.complaintNumber).toMatch(/^AC-\d{4}-\d+$/)
+
+      const list = await request('/api/acics/complaints?q=Development%20access%20persistence', { sessionCookie: cookie, portal: 'complainant' })
+      expect(list.status).toBe(200)
+      expect((await list.json()).items.some((row: any) => row.id === item.id)).toBe(true)
+
+      const detail = await request(`/api/acics/complaints/${item.id}`, { sessionCookie: cookie, portal: 'complainant' })
+      expect(detail.status).toBe(200)
+      expect((await detail.json()).item.subject).toBe('Development access persistence check')
+    })
+
+    it('marks development identities as synthetic for production login refusal', async () => {
+      const { cookie } = await devLogin({ identifier: 'synthetic-check' })
+      const me = await request('/api/auth/me', { sessionCookie: cookie })
+      const account = await me.json()
+      expect(account.sub.startsWith('dev-')).toBe(true)
+      const { isSyntheticIdentity } = await import('../src/backend/acics')
+      expect(isSyntheticIdentity(account.sub)).toBe(true)
+      expect(isSyntheticIdentity('dev-user')).toBe(true)
+      expect(isSyntheticIdentity('demo-complainant')).toBe(true)
+      expect(isSyntheticIdentity('user-real')).toBe(false)
+    })
+  })
+
+  describe('Phase 12: Configuration, errors, and client contract', () => {
+    it('returns a JSON 503 instead of crashing when the D1 binding is missing', async () => {
+      const noDb = { ...env, DB: undefined }
+      for (const path of ['/api/auth/me', '/api/auth/portal-access']) {
+        const res = await worker.fetch(
+          new Request(`http://localhost${path}`, {
+            method: path.includes('portal-access') ? 'POST' : 'GET',
+            headers: { Origin: 'http://localhost' },
+          }),
+          noDb as any,
+          {} as any,
+        )
+        expect(res.status).toBe(503)
+        expect(res.headers.get('content-type')).toContain('application/json')
+        const body = await res.json()
+        expect(body.error).toBeTruthy()
+        expect(JSON.stringify(body)).not.toContain('Something went wrong')
+      }
+    })
+
+    it('answers unauthenticated and unknown API calls with JSON errors, never a 500', async () => {
+      const me = await request('/api/auth/me')
+      expect(me.status).toBe(401)
+      expect((await me.json()).error).toBe('Sign in required.')
+
+      const onboarding = await request('/api/auth/onboarding/options')
+      expect(onboarding.status).toBe(200)
+
+      // Unknown API paths sit behind the authenticated router, so anonymous
+      // callers get a JSON 401; signed-in callers get a JSON 404. Never a 500.
+      const anonymousMissing = await request('/api/does-not-exist')
+      expect(anonymousMissing.status).toBe(401)
+      expect((await anonymousMissing.json()).error).toBe('Sign in required.')
+
+      const signedInMissing = await request('/api/does-not-exist', { demoSub: 'demo-official' })
+      expect(signedInMissing.status).toBe(404)
+      expect((await signedInMissing.json()).error).toBe('Not found.')
+    })
+
+    it('keeps every frontend request on the same-origin /api base', () => {
+      const root = join(import.meta.dir, '..', 'src', 'frontend')
+      const walk = (dir: string): string[] =>
+        readdirSync(dir).flatMap((name) => {
+          const full = join(dir, name)
+          return statSync(full).isDirectory() ? walk(full) : [full]
+        })
+      const files = walk(root).filter((file) => /\.(ts|tsx)$/.test(file))
+      expect(files.length).toBeGreaterThan(10)
+      for (const file of files) {
+        const source = readFileSync(file, 'utf8')
+        expect(source).not.toContain('localhost:')
+        expect(source).not.toContain('127.0.0.1')
+        expect(source).not.toContain(':8787')
+        expect(source).not.toContain(':3000')
+      }
+      const apiSource = readFileSync(join(root, 'lib', 'api.ts'), 'utf8')
+      expect(apiSource).toContain("?? '/api'")
+    })
+
+    it('seeds synthetic data idempotently and refuses to seed in production', async () => {
+      const first = await request('/api/dev/seed', { method: 'POST' })
+      expect(first.status).toBe(200)
+      const firstBody = await first.json()
+      expect(firstBody.label).toBe('LOCAL DEVELOPMENT MODE')
+      expect(firstBody.counts.complaints).toBeGreaterThan(0)
+
+      const second = await request('/api/dev/seed', { method: 'POST' })
+      expect(second.status).toBe(200)
+      expect((await second.json()).counts).toEqual(firstBody.counts)
+
+      const blocked = await worker.fetch(
+        new Request('http://localhost/api/dev/seed', {
+          method: 'POST',
+          headers: { Origin: 'http://localhost' },
+        }),
+        { ...env, APP_ENV: 'production' } as any,
+        {} as any,
+      )
+      expect(blocked.status).toBe(403)
+      expect((await blocked.json()).code).toBe('DEV_SEED_DISABLED')
     })
   })
 })

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { motion } from 'motion/react'
 import {
   AlertTriangle,
@@ -7,8 +7,10 @@ import {
   BriefcaseBusiness,
   Check,
   CheckCircle2,
+  CircleHelp,
   Eye,
   EyeOff,
+  Info,
   Landmark,
   Loader2,
   Lock,
@@ -22,7 +24,7 @@ import {
 
 import { useQueryClient } from '@tanstack/react-query'
 
-import { api, ApiError, checkPortalAccess, login, logout, requestAccount, setActivePortal, useAuthStatus, useOnboardingOptions } from '../lib/api'
+import { api, ApiError, checkPortalAccess, devSession, getActivePortal, login, logout, requestAccount, setActivePortal, useAuthStatus, useOnboardingOptions } from '../lib/api'
 import type { AcicsRole, PortalDecision, PortalKey } from '../lib/api'
 import { Badge, Button, Card, Checkbox, Dialog, Field, Input, Select } from '../components/ui'
 
@@ -69,7 +71,15 @@ const FALLBACK_PORTALS: { key: PortalKey; label: string; description: string; el
   },
 ]
 
+const PORTAL_COPY: Record<PortalKey, string> = {
+  complainant: 'Submit grievances, track complaint progress, and review updates.',
+  official: 'Review assigned cases, process complaints, and record case actions.',
+  admin: 'Manage users, institutions, access permissions, and audit records.',
+  bureau: 'Coordinate authorized cases, review potential overlaps, and manage coordination activities.',
+}
+
 const STEPS = ['Select portal', 'Sign in', 'Verify eligibility', 'Access decision']
+const DEV_STEPS = ['Select portal', 'Development sign-in', 'Verify access', 'Enter portal']
 
 const errorMessage = (error: unknown) =>
   error instanceof ApiError ? error.message : error instanceof Error ? error.message : 'Something went wrong. Please try again.'
@@ -97,8 +107,10 @@ export function PortalAccess({ onSignedIn, initialRequest = false }: { onSignedI
   const { data: status } = useAuthStatus()
   const { data: onboarding } = useOnboardingOptions()
   const qc = useQueryClient()
+  const panelRef = useRef<HTMLElement | null>(null)
 
-  const [portal, setPortal] = useState<PortalKey | null>(initialPortalFromUrl)
+  const devMode = Boolean(status?.devAuthEnabled)
+  const [portal, setPortal] = useState<PortalKey | null>(initialPortalFromUrl() ?? getActivePortal())
   const [notice] = useState(oauthNoticeFromUrl)
   const [step, setStep] = useState<1 | 2 | 3 | 4>(1)
   const [decision, setDecision] = useState<PortalDecision | null>(null)
@@ -129,6 +141,9 @@ export function PortalAccess({ onSignedIn, initialRequest = false }: { onSignedI
   const choosePortal = (key: PortalKey) => {
     setPortal(key)
     setDecision(null)
+    setShowAccountRequest(false)
+    setStep(2)
+    window.setTimeout(() => panelRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 30)
   }
 
   const decide = async (portalKey: PortalKey) => {
@@ -188,6 +203,18 @@ export function PortalAccess({ onSignedIn, initialRequest = false }: { onSignedI
     }
   }
 
+  const submitDevSession = async (identifier: string, displayName: string) => {
+    if (!portal) return
+    const result = await devSession(identifier, displayName, portal)
+    setHasSession(true)
+    if (result.access && !result.access.allowed) {
+      setDecision({ ...result.access, portal })
+      setStep(4)
+      return
+    }
+    await enterPortal(portal)
+  }
+
   const signOut = async () => {
     try {
       await logout()
@@ -201,49 +228,54 @@ export function PortalAccess({ onSignedIn, initialRequest = false }: { onSignedI
     }
   }
 
+  const requestComplainantAccess = () => {
+    setShowAccountRequest(true)
+    setRequestSent(false)
+    setStep(2)
+    window.setTimeout(() => panelRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 30)
+  }
+
   return (
     <div className="flex min-h-screen flex-col bg-bg">
       <GovStrip />
       <GovHeader />
       <main className="flex-1">
-        <div className="mx-auto w-full max-w-6xl px-4 py-8 sm:px-6 lg:py-12">
-          <div className="grid gap-8 lg:grid-cols-[minmax(0,0.9fr)_minmax(0,1.1fr)] lg:gap-12">
-            <section aria-labelledby="portal-access-heading">
-              <p className="text-[12px] font-semibold uppercase tracking-[0.14em] text-saffron">Secure access</p>
-              <h1 id="portal-access-heading" className="mt-3 text-balance text-[30px] font-semibold leading-[1.15] tracking-[-0.02em] text-navy-deep sm:text-[34px]">
-                One platform, four authorised portals
-              </h1>
-              <p className="mt-3 max-w-md text-[14px] leading-relaxed text-muted">
-                ACICS supports grievance redressal, case processing, bureau coordination, and administrative oversight. Portal
-                selection only tells us where you are trying to go — access is always decided from your server-side account.
-              </p>
+        <div className="mx-auto w-full max-w-6xl px-4 py-9 sm:px-6 lg:py-14">
+          <section aria-labelledby="portal-access-heading" className="mx-auto max-w-3xl text-center">
+            <p className="text-[11.5px] font-semibold uppercase tracking-[0.16em] text-saffron">Portal access</p>
+            <h1 id="portal-access-heading" className="mt-3 text-balance text-[32px] font-semibold leading-[1.15] tracking-[-0.02em] text-navy-deep sm:text-[38px]">
+              Welcome to ACICS
+            </h1>
+            <p className="mx-auto mt-3 max-w-2xl text-[14px] leading-relaxed text-muted">
+              {devMode
+                ? 'Choose the portal you want to explore. Local development access is enabled while real authentication is being prepared.'
+                : 'Choose the portal you want to use. Access is verified against your authorised account before any case information is shown.'}
+            </p>
+          </section>
 
-              <div className="mt-7 space-y-3">
-                <Assurance icon={<ShieldCheck />} title="Server-side eligibility" body="Roles, account status, and bureau assignment are verified on the server for every request." />
-                <Assurance icon={<Lock />} title="Identity is not authorisation" body="A correct password proves who you are. It does not grant a privileged portal." />
-                <Assurance icon={<Landmark />} title="Administrator-controlled provisioning" body="Complainant, Official, Bureau, and Administrator roles are assigned by authorised administrators." />
-              </div>
+          <fieldset className="mt-8">
+            <legend className="sr-only">Choose the portal you want to enter</legend>
+            <div className="grid gap-4 sm:grid-cols-2">
+              {portals.map((item) => (
+                <PortalCard
+                  key={item.key}
+                  item={item}
+                  selected={portal === item.key}
+                  onSelect={() => choosePortal(item.key)}
+                />
+              ))}
+            </div>
+          </fieldset>
 
-              <div className="mt-8 rounded-card border border-line bg-surface p-4">
-                <p className="text-[13px] font-semibold text-navy-deep">Faculty and institutional staff</p>
-                <p className="mt-1 text-[12.5px] leading-relaxed text-muted">
-                  Eligible complainants can request access and are verified against their stated designation and institution before
-                  the Complainant Portal is enabled.
-                </p>
-                <Button className="mt-3" size="sm" onClick={() => { setShowAccountRequest(true); setRequestSent(false) }}>
-                  Request Complainant Portal access <ArrowRight />
-                </Button>
-              </div>
-            </section>
-
-            <section aria-label="Portal sign in" className="lg:pt-1">
+          <div className="mt-10 grid gap-6 lg:grid-cols-[minmax(0,1.1fr)_minmax(0,0.9fr)] lg:gap-10">
+            <section ref={panelRef} aria-label="Portal sign in" className="scroll-mt-6">
               {notice && (
                 <div role="status" className="mb-4 rounded-control border border-[#e68a24]/40 bg-[#fdf1e2] p-3 text-[12px] leading-relaxed text-[#102a43]">
                   {notice}
                 </div>
               )}
-              <StepIndicator step={step} />
-              <Card className="mt-4 overflow-hidden border border-line">
+              <StepIndicator step={step} labels={devMode ? DEV_STEPS : STEPS} />
+              <Card className="mt-4 overflow-hidden border border-line shadow-sm">
                 {showAccountRequest ? (
                   <AccountRequestForm
                     options={onboarding}
@@ -253,38 +285,36 @@ export function PortalAccess({ onSignedIn, initialRequest = false }: { onSignedI
                   />
                 ) : step === 1 ? (
                   <div className="p-5 sm:p-6">
-                    <h2 className="text-[16px] font-semibold text-navy-deep">Select a portal</h2>
-                    <p className="mt-1 text-[12.5px] text-muted">Choosing a portal requests access to it. It does not grant access.</p>
-                    <fieldset className="mt-4">
-                      <legend className="sr-only">Choose the portal you want to enter</legend>
-                      <div className="grid gap-2.5 sm:grid-cols-2">
-                        {portals.map((item) => (
-                          <PortalCard
-                            key={item.key}
-                            item={item}
-                            selected={portal === item.key}
-                            onSelect={() => choosePortal(item.key)}
-                          />
-                        ))}
-                      </div>
-                    </fieldset>
-                    <div className="mt-5 flex items-center justify-between gap-3">
-                      <p className="text-[11.5px] leading-snug text-faint">
-                        Privileged roles cannot be requested from this page.
-                      </p>
-                      <Button variant="primary" disabled={!portal} onClick={() => setStep(2)}>
-                        Continue to sign in <ArrowRight />
-                      </Button>
+                    <h2 className="text-[16px] font-semibold text-navy-deep">Select a portal to continue</h2>
+                    <p className="mt-1 text-[12.5px] leading-relaxed text-muted">
+                      Choose a portal card above. Portal selection only tells us where you are trying to go — access is always
+                      decided from your server-side account.
+                    </p>
+                    <div className="mt-4 grid gap-2 sm:grid-cols-2">
+                      {portals.map((item) => (
+                        <Button key={item.key} className="justify-between" onClick={() => choosePortal(item.key)}>
+                          {item.label.replace(' Portal', '')} <ArrowRight />
+                        </Button>
+                      ))}
                     </div>
                   </div>
                 ) : step === 2 && selected ? (
-                  <SignInPanel
-                    portal={selected}
-                    googleConfigured={Boolean(status?.googleConfigured)}
-                    onBack={() => setStep(1)}
-                    onSubmit={submitCredentials}
-                    onForgot={() => setForgotOpen(true)}
-                  />
+                  devMode ? (
+                    <DevSignInPanel
+                      portal={selected}
+                      onBack={() => setStep(1)}
+                      onSubmit={submitDevSession}
+                      onRequestAccess={requestComplainantAccess}
+                    />
+                  ) : (
+                    <SignInPanel
+                      portal={selected}
+                      googleConfigured={Boolean(status?.googleConfigured)}
+                      onBack={() => setStep(1)}
+                      onSubmit={submitCredentials}
+                      onForgot={() => setForgotOpen(true)}
+                    />
+                  )
                 ) : step === 3 && selected ? (
                   <EligibilityChecklist portal={selected} />
                 ) : (
@@ -293,17 +323,48 @@ export function PortalAccess({ onSignedIn, initialRequest = false }: { onSignedI
                     portal={selected}
                     hasSession={hasSession}
                     onRetry={() => { setDecision(null); setStep(1) }}
-                    onRequestAccess={() => { setShowAccountRequest(true); setRequestSent(false) }}
+                    onRequestAccess={requestComplainantAccess}
                     onSignOut={signOut}
                   />
                 )}
               </Card>
-
               <p className="mt-4 text-center text-[11.5px] leading-relaxed text-faint">
                 This is a demonstration deployment. Accounts, institutions, and cases in the dataset are synthetic. Do not enter
                 real confidential information.
               </p>
             </section>
+
+            <aside className="space-y-4">
+              <div className="rounded-card border border-line bg-surface p-5">
+                <h2 className="text-[13px] font-semibold text-navy-deep">How access is decided</h2>
+                <div className="mt-4 space-y-3.5">
+                  <Assurance icon={<ShieldCheck />} title="Server-side eligibility" body="Roles, account status, and bureau assignment are verified on the server for every request." />
+                  <Assurance icon={<Lock />} title="Identity is not authorisation" body="Signing in proves who you are. It does not grant a privileged portal." />
+                  <Assurance icon={<Landmark />} title="Administrator-controlled provisioning" body="Official, Bureau, and Administrator roles are assigned by authorised administrators." />
+                </div>
+              </div>
+
+              <div className="rounded-card border border-line bg-surface p-5">
+                <p className="text-[13px] font-semibold text-navy-deep">Faculty and institutional staff</p>
+                <p className="mt-1 text-[12px] leading-relaxed text-muted">
+                  Eligible complainants can request access. Designation and institution are verified by an administrator before
+                  the Complainant Portal is enabled.
+                </p>
+                <Button className="mt-3" size="sm" onClick={requestComplainantAccess}>
+                  Request Complainant Portal access <ArrowRight />
+                </Button>
+              </div>
+
+              {devMode && (
+                <div className="rounded-card border border-success/25 bg-success-soft p-5">
+                  <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-success">Local development mode</p>
+                  <p className="mt-2 text-[12px] leading-relaxed text-navy-deep">
+                    Any non-empty user ID or email opens a synthetic session with all four portals. This mode is enforced by the
+                    backend, is unavailable in production, and is not a verified identity. Real sign-in will be added later.
+                  </p>
+                </div>
+              )}
+            </aside>
           </div>
         </div>
       </main>
@@ -317,31 +378,114 @@ export function GovStrip() {
   return (
     <div className="bg-navy-deep text-white">
       <div className="mx-auto flex max-w-6xl flex-wrap items-center justify-between gap-2 px-4 py-1.5 text-[11px] sm:px-6">
-        <span className="tracking-wide">Government of India · All India Council for Technical Education</span>
+        <span className="tracking-wide">AICTE · Complaint intelligence and coordination</span>
         <span className="flex items-center gap-1.5 text-white/75">
-          <Lock className="size-3" aria-hidden /> Secure government portal
+          <Info className="size-3" aria-hidden /> Prototype deployment · not connected to live AICTE systems
         </span>
       </div>
-      <div className="h-[3px] bg-saffron" />
+      <div className="flex h-[3px]" aria-hidden>
+        <span className="w-1/3 bg-saffron" />
+        <span className="w-1/3 bg-white/25" />
+        <span className="w-1/3 bg-success" />
+      </div>
     </div>
   )
 }
 
 export function GovHeader() {
+  const { data: status } = useAuthStatus()
+  const [helpOpen, setHelpOpen] = useState(false)
+  const [aboutOpen, setAboutOpen] = useState(false)
+  const devMode = Boolean(status?.devAuthEnabled)
+
   return (
-    <header className="border-b border-line bg-surface">
+    <header className="border-b border-white/10 bg-navy text-white">
       <div className="mx-auto flex max-w-6xl items-center gap-3 px-4 py-4 sm:px-6">
-        <span className="grid size-11 place-items-center rounded-control border border-line bg-accent-soft text-navy" aria-hidden>
+        <span className="grid size-11 shrink-0 place-items-center rounded-control border border-white/20 bg-white/10 text-white" aria-hidden>
           <Landmark className="size-5" />
         </span>
         <div className="min-w-0">
-          <p className="text-[17px] font-semibold leading-tight tracking-[-0.01em] text-navy-deep">ACICS</p>
-          <p className="truncate text-[11.5px] text-muted">AICTE Complaint Intelligence &amp; Coordination System</p>
+          <div className="flex flex-wrap items-center gap-2">
+            <p className="text-[17px] font-semibold leading-tight tracking-[0.01em]">ACICS</p>
+            {devMode && (
+              <span className="rounded-[4px] border border-saffron/60 bg-saffron/15 px-1.5 py-0.5 text-[9.5px] font-semibold uppercase tracking-[0.12em] text-saffron">
+                Local development mode
+              </span>
+            )}
+          </div>
+          <p className="truncate text-[11.5px] text-white/80">AICTE Complaint Intelligence &amp; Coordination System</p>
+          <p className="mt-0.5 hidden text-[11px] text-white/60 sm:block">
+            Grievance redressal, case coordination, and institutional oversight in one platform.
+          </p>
         </div>
-        <span className="ml-auto hidden rounded-[4px] border border-line px-2 py-1 text-[10.5px] font-medium uppercase tracking-[0.12em] text-muted sm:inline">
-          Restricted access
-        </span>
+        <div className="ml-auto flex shrink-0 items-center gap-1">
+          <button
+            type="button"
+            aria-label="Help"
+            onClick={() => setHelpOpen(true)}
+            className="inline-flex items-center gap-1.5 rounded-control px-2 py-1.5 text-[11.5px] font-medium text-white/85 hover:bg-white/10 hover:text-white"
+          >
+            <CircleHelp className="size-3.5" aria-hidden /> <span className="hidden sm:inline">Help</span>
+          </button>
+          <button
+            type="button"
+            aria-label="About"
+            onClick={() => setAboutOpen(true)}
+            className="inline-flex items-center gap-1.5 rounded-control px-2 py-1.5 text-[11.5px] font-medium text-white/85 hover:bg-white/10 hover:text-white"
+          >
+            <Info className="size-3.5" aria-hidden /> <span className="hidden sm:inline">About</span>
+          </button>
+        </div>
       </div>
+      <div className="flex h-[3px]" aria-hidden>
+        <span className="w-1/4 bg-saffron" />
+        <span className="flex-1 bg-white/15" />
+        <span className="w-1/4 bg-success" />
+      </div>
+
+      <Dialog open={helpOpen} onClose={() => setHelpOpen(false)} title="Help and guidance" description="Using the ACICS prototype portals." width={560}>
+        <div className="space-y-4 text-[12.5px] leading-relaxed text-fg">
+          {devMode ? (
+            <div className="rounded-control border border-success/25 bg-success-soft p-3 text-[12px]">
+              <p className="font-semibold text-success">Local development access is enabled</p>
+              <p className="mt-1">
+                Enter any non-empty user ID or email on the sign-in panel. A synthetic account with all four portal roles is
+                created for exploration. This is not real authentication and is refused when the backend is in production mode.
+              </p>
+            </div>
+          ) : (
+            <p>Sign in with the credentials issued by your ACICS administrator. If you do not yet have an account, request Complainant Portal access and an administrator will review it.</p>
+          )}
+          <div>
+            <p className="font-semibold text-navy-deep">Moving between portals</p>
+            <p className="mt-1">Once signed in, use the portal switcher in the sidebar (or the mobile menu) to change views. Only portals granted to your account are listed.</p>
+          </div>
+          <div>
+            <p className="font-semibold text-navy-deep">Prototype boundaries</p>
+            <p className="mt-1">Complaint data is synthetic. Uploads are not stored, notifications are in-app only, and deadlines are illustrative rather than official AICTE service standards.</p>
+          </div>
+          <div className="flex justify-end">
+            <Button onClick={() => setHelpOpen(false)}>Close</Button>
+          </div>
+        </div>
+      </Dialog>
+
+      <Dialog open={aboutOpen} onClose={() => setAboutOpen(false)} title="About ACICS" description="AICTE Complaint Intelligence & Coordination System." width={560}>
+        <div className="space-y-4 text-[12.5px] leading-relaxed text-fg">
+          <p>ACICS is a prototype platform for complaint intake, case processing, administrative oversight, and bureau coordination across technical institutions.</p>
+          <div>
+            <p className="font-semibold text-navy-deep">Not an official service</p>
+            <p className="mt-1">This deployment is not connected to live AICTE or Government of India systems and does not use official emblems. Accounts, institutions, cases, and deadlines are synthetic.</p>
+          </div>
+          <div>
+            <p className="font-semibold text-navy-deep">Security model</p>
+            <p className="mt-1">Portal access is decided server-side from account status, assigned roles, and bureau scope. Selecting a portal never grants access, and development mode cannot be enabled on a production deployment.</p>
+          </div>
+          <div className="flex justify-end">
+            <Button onClick={() => setAboutOpen(false)}>Close</Button>
+          </div>
+        </div>
+      </Dialog>
     </header>
   )
 }
@@ -350,17 +494,17 @@ export function GovFooter() {
   return (
     <footer className="border-t border-line bg-surface">
       <div className="mx-auto flex max-w-6xl flex-col gap-2 px-4 py-5 text-[11.5px] leading-relaxed text-muted sm:flex-row sm:items-center sm:justify-between sm:px-6">
-        <p>© {new Date().getFullYear()} ACICS demonstration deployment. Not an official Government of India service.</p>
+        <p>© {new Date().getFullYear()} ACICS prototype deployment. Not an official Government of India service.</p>
         <p className="text-faint">Synthetic data · prototype deadlines · no live AICTE integration</p>
       </div>
     </footer>
   )
 }
 
-function StepIndicator({ step }: { step: 1 | 2 | 3 | 4 }) {
+function StepIndicator({ step, labels = STEPS }: { step: 1 | 2 | 3 | 4; labels?: string[] }) {
   return (
     <ol className="flex items-center gap-1.5" aria-label="Access steps">
-      {STEPS.map((label, index) => {
+      {labels.map((label, index) => {
         const value = (index + 1) as 1 | 2 | 3 | 4
         const state = value < step ? 'done' : value === step ? 'current' : 'todo'
         return (
@@ -377,7 +521,7 @@ function StepIndicator({ step }: { step: 1 | 2 | 3 | 4 }) {
               {state === 'done' ? <Check className="size-3" aria-hidden /> : value}
             </span>
             <span className={`truncate text-[10.5px] ${state === 'current' ? 'font-semibold text-navy-deep' : 'text-faint'}`}>{label}</span>
-            {index < STEPS.length - 1 && <span className="ml-auto hidden h-px flex-1 bg-line sm:block" aria-hidden />}
+            {index < labels.length - 1 && <span className="ml-auto hidden h-px flex-1 bg-line sm:block" aria-hidden />}
           </li>
         )
       })}
@@ -396,27 +540,36 @@ function PortalCard({
 }) {
   const Icon = PORTAL_ICONS[item.key] ?? Users
   return (
-    <label
-      className={`group relative flex cursor-pointer gap-3 rounded-control border p-3 transition-colors has-[:focus-visible]:border-navy has-[:focus-visible]:ring-2 has-[:focus-visible]:ring-navy/40 ${
-        selected ? 'border-navy bg-accent-soft ring-1 ring-navy/20' : 'border-line bg-surface hover:border-line-strong hover:bg-surface-2'
+    <button
+      type="button"
+      onClick={onSelect}
+      aria-pressed={selected}
+      className={`group relative flex h-full w-full flex-col rounded-card border bg-surface p-5 text-left shadow-sm transition-all hover:-translate-y-0.5 hover:shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-navy focus-visible:ring-offset-2 ${
+        selected ? 'border-navy ring-1 ring-navy/25' : 'border-line hover:border-line-strong'
       }`}
     >
-      <input type="radio" name="acics-portal" value={item.key} checked={selected} onChange={onSelect} className="sr-only" />
-      <span
-        className={`mt-0.5 grid size-8 shrink-0 place-items-center rounded-control border ${
-          selected ? 'border-navy/20 bg-surface text-navy' : 'border-line bg-surface-2 text-muted'
-        }`}
-        aria-hidden
-      >
-        <Icon className="size-4" />
+      <span className="flex items-start gap-3">
+        <span
+          className={`grid size-11 shrink-0 place-items-center rounded-control border ${
+            selected ? 'border-navy/25 bg-accent-soft text-navy' : 'border-line bg-surface-2 text-navy'
+          }`}
+          aria-hidden
+        >
+          <Icon className="size-5" />
+        </span>
+        <span className="min-w-0 flex-1">
+          <span className="flex items-center gap-1.5">
+            <span className="block text-[14px] font-semibold leading-snug text-navy-deep">{item.label}</span>
+            {selected && <CheckCircle2 className="size-4 shrink-0 text-navy" aria-hidden />}
+          </span>
+          <span className="mt-1.5 block min-h-[36px] text-[12px] leading-relaxed text-muted">{PORTAL_COPY[item.key]}</span>
+        </span>
       </span>
-      <span className="min-w-0">
-        <span className="block text-[12.5px] font-semibold leading-tight text-navy-deep">{item.label}</span>
-        <span className="mt-1 block text-[11px] leading-snug text-muted">{item.description}</span>
-        <span className="mt-1.5 block text-[10.5px] leading-snug text-faint">Eligible: {item.eligibility.join(' · ')}</span>
+      <span className="mt-4 flex items-center justify-between border-t border-line pt-3 text-[12px] font-semibold text-navy">
+        <span>{selected ? 'Selected' : 'Enter portal'}</span>
+        <ArrowRight className="size-4 transition-transform group-hover:translate-x-0.5" aria-hidden />
       </span>
-      {selected && <CheckCircle2 className="absolute right-2.5 top-2.5 size-4 text-navy" aria-hidden />}
-    </label>
+    </button>
   )
 }
 
@@ -430,6 +583,108 @@ function Assurance({ icon, title, body }: { icon: React.ReactNode; title: string
         <p className="text-[12.5px] font-semibold text-navy-deep">{title}</p>
         <p className="mt-0.5 text-[11.5px] leading-relaxed text-muted">{body}</p>
       </div>
+    </div>
+  )
+}
+
+function DevSignInPanel({
+  portal,
+  onBack,
+  onSubmit,
+  onRequestAccess,
+}: {
+  portal: { key: PortalKey; label: string }
+  onBack: () => void
+  onSubmit: (identifier: string, displayName: string) => Promise<void>
+  onRequestAccess: () => void
+}) {
+  const [identifier, setIdentifier] = useState('')
+  const [displayName, setDisplayName] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  const submit = async (event: React.FormEvent) => {
+    event.preventDefault()
+    setError(null)
+    if (!identifier.trim()) {
+      setError('Enter a user ID or email address to continue.')
+      return
+    }
+    setBusy(true)
+    try {
+      await onSubmit(identifier.trim(), displayName.trim())
+    } catch (err) {
+      setError(errorMessage(err))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="p-5 sm:p-6">
+      <button type="button" onClick={onBack} className="inline-flex items-center gap-1 text-[11.5px] font-medium text-muted hover:text-navy-deep">
+        <ArrowLeft className="size-3.5" aria-hidden /> Change portal
+      </button>
+      <div className="mt-3 flex items-start justify-between gap-3">
+        <div>
+          <h2 className="text-[16px] font-semibold text-navy-deep">Sign in to the {portal.label}</h2>
+          <p className="mt-1 text-[12.5px] leading-relaxed text-muted">
+            Local development access needs no account or password. Enter any non-empty ID or email to open a synthetic session.
+          </p>
+        </div>
+        <Badge tone="success">LOCAL DEVELOPMENT MODE</Badge>
+      </div>
+
+      <div className="mt-4 rounded-control border border-success/25 bg-success-soft p-3 text-[11.5px] leading-relaxed text-navy-deep">
+        <p className="font-semibold text-success">Development sign-in</p>
+        <p className="mt-1">
+          This session is synthetic, labelled, and refused when the backend runs with <span className="font-mono text-[10.5px]">APP_ENV=production</span>.
+          It creates an account with all four portal roles so you can explore every view. Real authentication will be added later.
+        </p>
+      </div>
+
+      {error && (
+        <div role="alert" aria-live="assertive" className="mt-4 flex items-start gap-2 rounded-control border border-danger/25 bg-danger-soft p-3 text-[12px] leading-relaxed text-danger">
+          <AlertTriangle className="mt-0.5 size-4 shrink-0" aria-hidden />
+          <span>{error}</span>
+        </div>
+      )}
+
+      <form onSubmit={submit} className="mt-4 space-y-3.5" noValidate>
+        <Field label="User ID or email address">
+          <Input
+            value={identifier}
+            onChange={(e) => setIdentifier(e.target.value)}
+            placeholder="e.g. reviewer@example.org or officer-01"
+            autoComplete="username"
+            autoFocus
+            disabled={busy}
+            required
+          />
+        </Field>
+        <Field label="Display name (optional)">
+          <Input
+            value={displayName}
+            onChange={(e) => setDisplayName(e.target.value)}
+            placeholder="Shown in the workspace header"
+            autoComplete="name"
+            disabled={busy}
+          />
+        </Field>
+
+        <Button type="submit" variant="primary" className="w-full" loading={busy}>
+          {busy ? 'Opening development session…' : 'Continue to portal'}
+          {!busy && <ArrowRight />}
+        </Button>
+      </form>
+
+      <p className="mt-4 text-[11px] leading-relaxed text-faint">
+        Need a real Complainant account instead?{' '}
+        <button type="button" onClick={onRequestAccess} className="font-medium text-navy underline">
+          Request Complainant Portal access
+        </button>
+        . Mock sign-in is for interface testing only and must never be described as verified identity.
+      </p>
     </div>
   )
 }

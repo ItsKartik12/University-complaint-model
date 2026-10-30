@@ -30,16 +30,45 @@ bun run build
 
 # 5. Start local development server (Vite + local Cloudflare Worker & D1 binding)
 bun run dev
+
+# 6. Optional: ensure the synthetic dataset without deleting existing rows
+bun run seed
 ```
 
 The application will be served locally at:
 👉 **`http://localhost:5173`**
 
+The Worker and the React app share one Vite process because D1 is an internal Cloudflare binding. `dev:frontend` and `dev:backend` are aliases of `dev` for command compatibility; starting them together still means one server, not two ports.
+
+| Script | Purpose |
+| :--- | :--- |
+| `bun run dev` | Unified Vite + Worker + Miniflare D1 server |
+| `bun run dev:frontend`, `bun run dev:backend` | Aliases of the unified server |
+| `bun run seed` | POST `/api/dev/seed` (development only, idempotent) |
+| `bun test` | 68 tests / 411 assertions |
+| `bun run typecheck` | `tsc --noEmit` |
+| `bun run build` | Worker bundle + static client |
+| `bun run bootstrap:admin` | Out-of-band first administrator (see below) |
+
 ---
 
-## Local Development Accounts
+## Local Development Access
 
-Development sign-in uses real email/password accounts seeded in the local D1 database, with server-side sessions. Seeded identities exist only outside production: with `APP_ENV=production` they are neither seeded nor accepted at sign-in. The sign-in screen does not list or auto-fill accounts; use the credentials below.
+Local development uses a **labelled synthetic session**, issued by the worker only while `APP_ENV` is not `production` and the request originates from a loopback origin.
+
+1. Open `http://localhost:5173`.
+2. Choose any of the four portal cards.
+3. Enter **any non-empty user ID or email address** (for example `reviewer@example.org`). A password is not required.
+4. Continue: the backend creates a deterministic `dev-` account holding all four portal roles, so every workspace can be explored without an approval workflow.
+5. Switch portals from the sidebar; each switch is re-validated by the server.
+
+The screen and the session response both say `LOCAL DEVELOPMENT MODE`. This is explicitly synthetic — it is not a verified identity and must not be described as one. The endpoint returns `403 DEV_AUTH_DISABLED` when `APP_ENV=production`, behind an identity provider, or on a non-loopback origin, so the bypass cannot be enabled in production.
+
+The client base URL is same-origin `/api` by default (`VITE_API_BASE_URL`); no frontend file hardcodes a backend port.
+
+### Seeded development accounts (optional)
+
+The synthetic dataset also includes real email/password accounts for testing approval and denial paths. They exist only outside production: with `APP_ENV=production` they are neither seeded nor accepted at sign-in. The sign-in screen does not list or auto-fill accounts; use the credentials below.
 
 All seeded accounts use the development password **`AcicsPassword#2026`**.
 
@@ -82,7 +111,7 @@ ACICS_BOOTSTRAP_ADMIN_NAME="Your Name"
 ACICS_BOOTSTRAP_ADMIN_PASSWORD="a-strong-password-at-least-12-chars"
 ```
 
-`ensureBootstrapAdmin` (`src/worker/acics.ts`) validates the email and the 12-character minimum, inserts the account, its `ADMIN` role and an `ADMIN_BOOTSTRAPPED` audit entry, then logs a warning. It is a no-op once any administrator exists, so it is safe to leave configured — but remove `ACICS_BOOTSTRAP_ADMIN_PASSWORD` after the first sign-in. Quote any value containing `#`; Wrangler treats an unquoted `#` as a comment.
+`ensureBootstrapAdmin` (`src/backend/acics.ts`) validates the email and the 12-character minimum, inserts the account, its `ADMIN` role and an `ADMIN_BOOTSTRAPPED` audit entry, then logs a warning. It is a no-op once any administrator exists, so it is safe to leave configured — but remove `ACICS_BOOTSTRAP_ADMIN_PASSWORD` after the first sign-in. Quote any value containing `#`; Wrangler treats an unquoted `#` as a comment.
 
 **Deployed D1 (remote CLI).** Load the deployed site once (so the schema exists), then run:
 
@@ -152,15 +181,37 @@ Live Google sign-in was **not** exercised in this environment because no real OA
 
 ---
 
+## Source Structure
+
+```
+src/
+├── backend/     Hono worker: auth, authorization, ACICS schema/routes, admin APIs
+├── frontend/    React SPA: portal access flow, role workspaces, UI primitives
+└── shared/      Safe cross-layer types
+```
+
+The backend is `src/backend/index.ts` (worker entry, declared in `wrangler.jsonc`). The frontend entry is `src/frontend/main.tsx` (loaded by `index.html`). Neither side imports secrets or the other's implementation.
+
+Configuration templates:
+
+- `.env.example` — public and local runtime placeholders.
+- `src/frontend/.env.example` — `VITE_*` public values only.
+- `src/backend/.dev.vars.example` — server-only values; copy to the repository root as `.dev.vars` (gitignored).
+
+Database and API findings, route coverage, and remaining gaps are documented in [docs/PROJECT_AUDIT.md](docs/PROJECT_AUDIT.md), [docs/ROUTE_AUDIT.md](docs/ROUTE_AUDIT.md), and [docs/API_AUDIT.md](docs/API_AUDIT.md).
+
+---
+
 ## Database & Architecture
 
 - **Frontend**: React 19, Vite 8, TailwindCSS v4, TanStack Query v5, Lucide Icons, Framer Motion.
 - **Backend**: Cloudflare Workers, Hono Web Framework, D1 SQLite database binding (`DB`).
 - **Storage**: Local Miniflare D1 emulation configured in `wrangler.jsonc`.
-- **Database Seeding**: On first run, `ensureAcics(db)` initializes schemas and seeds:
-  - 9 accounts (7 active demo identities, 1 pending approval, 1 suspended) and 9 role assignments
-  - 10 Institutions, 22 Complaint records, 3 Bureaus
+- **Database Seeding**: On first request, `ensureAcics(db)` initializes the schema and inserts missing synthetic records:
+  - 9 accounts (7 active demo identities, 1 pending approval, 1 suspended) and their role assignments
+  - 10 institutions, 22 complaint records, 3 bureaus
   - Demonstration audit logs and notifications
+  - `bun run seed` re-runs the same idempotent seeding; no existing row is deleted or rewritten.
 
 ### Resetting Local Database
 Local D1 state lives in `.wrangler/state/v3/d1`. If it becomes unreadable or read-only (for example after switching Miniflare/workerd versions, or after an external process wrote to the SQLite files), stop the dev server, back up the **whole** directory, then remove it:
@@ -202,7 +253,7 @@ Run the full automated test suite with:
 bun test
 ```
 
-Current result: **56 passing, 0 failing**.
+Current result: **68 passing, 0 failing** (411 assertions, 2 files, ~4.6 s).
 
 Test coverage includes:
 - **D1 Mock & Seed**: Verification of schema creation and synthetic dataset counts.
@@ -214,16 +265,23 @@ Test coverage includes:
 - **Official & Bureau Workflows**: Status transitions, forbidden transition rejection (409), note visibility, case assignment, bureau transfer.
 - **Administrator Capabilities**: User management, institution creation, self-deactivation prevention, audit logging.
 - **Security & Integrity**: SQL injection attack resilience, XSS boundaries, CSRF/origin verification.
+- **Local development access**: arbitrary non-empty ID sign-in, blank rejection, all four portals, production refusal of mock auth and seeding.
+- **Configuration & client contract**: missing D1 returns JSON 503, unknown API paths return JSON errors, no hardcoded backend ports in the frontend, idempotent seed.
 
 ### Browser verification
 
-The UI was driven end-to-end through headless Chrome over the DevTools Protocol against `bun run dev` (57 checks, all passing). Covered: all four portal cards, keyboard focus rings, empty-form validation, show/hide password, busy and eligibility states, each role dashboard, logout and session clearing, UI account request, pending denial, wrong-portal denial, and the 390 × 844 mobile layout. No uncaught exceptions or unexpected failed requests were recorded; the only 401s are the expected signed-out `/api/auth/me` probes.
+The UI was driven through headless Chrome over the DevTools Protocol against `bun run dev` on a fresh local D1 (2026-10-30):
 
-To repeat the key paths manually:
+- **43/43 core UI checks**: public flow and exact copy, Help/About, development sign-in, all four portals, portal switching, direct hash navigation, nested refresh, Back, complaint submission, case drawer, 390 × 844 mobile layout. No uncaught exceptions; the only failed network requests were the expected signed-out `/api/auth/me` 401s.
+- **39/39 route-sweep checks**: 27 role→page combinations, hidden navigation for complainants, institution/overlap drawers, admin dialogs, mobile navigation and switcher. No 5xx responses.
+- **28/28 live API checks**: unauthenticated 401s, onboarding 200, Google 501, dev-session validation, portal narrowing, complaint create → list → detail → status transition, admin-only 403s, cross-identity isolation, logout invalidation.
+
+Repeat the key paths manually:
 
 1. `bun run dev`, open `http://localhost:5173`.
-2. Select **Complainant Portal** → sign in as `ananya.demo@example.test` / `AcicsPassword#2026` → eligibility checklist → portal opens.
-3. Sign out, select **Administrator Portal** with the same complainant credentials → denial screen with `PORTAL_NOT_AUTHORIZED`.
-4. Sign in as `devika.admin@example.test` → **Users** → approve the pending request from Suresh Nair.
-5. Sign in as `priya.multirole@example.test` → switch between Complainant and Official from the sidebar.
-6. Try `meera.suspended@example.test` → suspended denial; try `suresh.pending@example.test` before approval → pending denial.
+2. Choose **Complainant Portal**, enter `reviewer@example.org`, continue → workspace opens in local development mode.
+3. Use the sidebar portal switcher to open Official, Administrator, and Bureau workspaces without signing in again.
+4. Refresh a nested route such as `#/users` or a case detail; use Back to return to the previous screen.
+5. Submit a complaint from **Case queue → Submit a complaint**; confirm it appears in the complainant queue and survives refresh.
+6. Sign out; the session cookie is cleared and `/api/auth/me` returns `401`.
+7. To verify the real approval path instead, sign in with `devika.admin@example.test` and approve the pending request from Suresh Nair; or sign in as `meera.suspended@example.test` to see the suspension denial.

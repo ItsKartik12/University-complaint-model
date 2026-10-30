@@ -1,4 +1,4 @@
-// Types shared by the Worker (src/worker) and the app (src/app).
+// Types shared by the backend (src/backend) and the frontend (src/frontend).
 
 export type ContactStatus = 'lead' | 'active' | 'customer' | 'churned'
 export const CONTACT_STATUSES: ContactStatus[] = ['lead', 'active', 'customer', 'churned']

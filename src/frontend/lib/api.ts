@@ -258,6 +258,20 @@ export const login = (email: string, password: string, portal: PortalKey) =>
 
 export const logout = () => api<{ ok: true }>('/auth/logout', { method: 'POST' })
 
+export interface DevSessionResult {
+  ok: true
+  development: true
+  label: string
+  message: string
+  portal: PortalKey | null
+  access: PortalDecision | null
+  account: Record<string, unknown> | null
+}
+
+/** Loopback-only synthetic session. The server refuses this outside development mode. */
+export const devSession = (identifier: string, displayName: string, portal: PortalKey | null) =>
+  api<DevSessionResult>('/auth/dev-session', { method: 'POST', json: { identifier, displayName, portal } })
+
 export const checkPortalAccess = (portal: PortalKey) =>
   api<PortalDecision>('/auth/portal-access', { method: 'POST', json: { portal } })
 
