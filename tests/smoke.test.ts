@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'bun:test'
 import { createMockD1 } from './d1-mock'
-import { ensureAcics } from '../src/backend/acics'
+import { ensureAcics } from '../src/backend/routes/acics'
 
 describe('D1 Mock and Seed', () => {
   it('creates tables and seeds institutions, complaints, and role-aware accounts', async () => {

@@ -2,7 +2,7 @@ import { describe, expect, it, beforeEach } from 'bun:test'
 import { readFileSync, readdirSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import { createMockD1 } from './d1-mock'
-import { ensureAcics } from '../src/backend/acics'
+import { ensureAcics } from '../src/backend/routes/acics'
 import worker from '../src/backend/index'
 
 function makeEnv(db: any) {
@@ -967,6 +967,42 @@ describe('ACICS Full System & API Integration Tests', () => {
       expect(res.status).toBe(403)
     })
 
+    it('honours explicit AUTH_MODE=mock on a loopback origin', async () => {
+      const mockEnv = { ...env, APP_ENV: 'development', AUTH_MODE: 'mock' } as any
+      const status = await worker.fetch(new Request('http://localhost/api/auth/status'), mockEnv, {} as any)
+      const statusBody = await status.json()
+      expect(statusBody.mode).toBe('mock')
+      expect(statusBody.devAuthEnabled).toBe(true)
+
+      const res = await worker.fetch(
+        new Request('http://localhost/api/auth/dev-session', {
+          method: 'POST',
+          headers: { Origin: 'http://localhost', 'Content-Type': 'application/json' },
+          body: JSON.stringify({ identifier: 'mock-mode-user', portal: 'admin' }),
+        }),
+        mockEnv,
+        {} as any,
+      )
+      expect(res.status).toBe(200)
+      const data = await res.json()
+      expect(data.label).toBe('LOCAL DEVELOPMENT MODE')
+      expect(data.account.roles.sort()).toEqual(['ADMIN', 'BUREAU_OFFICER', 'COMPLAINANT', 'OFFICIAL'])
+    })
+
+    it('never allows AUTH_MODE=mock to override production', async () => {
+      const res = await worker.fetch(
+        new Request('http://localhost/api/auth/dev-session', {
+          method: 'POST',
+          headers: { Origin: 'http://localhost', 'Content-Type': 'application/json' },
+          body: JSON.stringify({ identifier: 'production-mock-probe' }),
+        }),
+        { ...env, APP_ENV: 'production', AUTH_MODE: 'mock' } as any,
+        {} as any,
+      )
+      expect(res.status).toBe(403)
+      expect((await res.json()).code).toBe('DEV_AUTH_DISABLED')
+    })
+
     it('persists a complaint created through a development session', async () => {
       const { cookie } = await devLogin({ identifier: 'complaint-author' })
       const created = await request('/api/acics/complaints', {
@@ -999,7 +1035,7 @@ describe('ACICS Full System & API Integration Tests', () => {
       const me = await request('/api/auth/me', { sessionCookie: cookie })
       const account = await me.json()
       expect(account.sub.startsWith('dev-')).toBe(true)
-      const { isSyntheticIdentity } = await import('../src/backend/acics')
+      const { isSyntheticIdentity } = await import('../src/backend/routes/acics')
       expect(isSyntheticIdentity(account.sub)).toBe(true)
       expect(isSyntheticIdentity('dev-user')).toBe(true)
       expect(isSyntheticIdentity('demo-complainant')).toBe(true)
@@ -1062,7 +1098,7 @@ describe('ACICS Full System & API Integration Tests', () => {
         expect(source).not.toContain(':8787')
         expect(source).not.toContain(':3000')
       }
-      const apiSource = readFileSync(join(root, 'lib', 'api.ts'), 'utf8')
+      const apiSource = readFileSync(join(root, 'services', 'api', 'api.ts'), 'utf8')
       expect(apiSource).toContain("?? '/api'")
     })
 

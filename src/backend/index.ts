@@ -1,7 +1,8 @@
 import { Hono } from 'hono'
 
-import { authMode, currentUser, getAuth, requireUser, sessionSecret } from './auth'
+import { authMode, currentUser, getAuth, requireUser } from './auth'
 import {
+  accountSummary,
   canAccessPortal,
   COMPLAINANT_DESIGNATIONS,
   isPortalKey,
@@ -9,19 +10,22 @@ import {
   PORTAL_KEYS,
   PORTALS,
   readPortalHeader,
-} from './authorization'
-import type { PortalKey } from './authorization'
-import { createSessionToken, hashPassword, verifyPassword, verifySessionToken } from './crypto'
-import { requireDb } from './db'
-import type { AppContext, Env } from './env'
-import { activities } from './routes/activities'
-import { companies } from './routes/companies'
-import { contacts } from './routes/contacts'
-import { deals } from './routes/deals'
-import { files } from './routes/files'
-import { tasks } from './routes/tasks'
-import { workspace } from './routes/workspace'
-import { acics, DEMO_USERS, ensureAcics, ensureBootstrapAdmin, isSyntheticIdentity } from './acics'
+} from './auth/authorization'
+import type { PortalKey } from './auth/authorization'
+import { hashPassword, verifyPassword, verifySessionToken } from './auth/crypto'
+import { isGoogleConfigured, googleAuthProvider } from './auth/providers/google'
+import { mockAuthProvider } from './auth/providers/mock'
+import { clearSessionCookies, cookiesOf, isSecureRequest, issueSession, sessionSecret } from './auth/session'
+import { requireDb } from './database/connection'
+import type { AppContext, Env } from './types'
+import { activities } from './routes/legacy/activities'
+import { companies } from './routes/legacy/companies'
+import { contacts } from './routes/legacy/contacts'
+import { deals } from './routes/legacy/deals'
+import { files } from './routes/legacy/files'
+import { tasks } from './routes/legacy/tasks'
+import { workspace } from './routes/legacy/workspace'
+import { acics, DEMO_USERS, ensureAcics, ensureBootstrapAdmin, isSyntheticIdentity } from './routes/acics'
 
 const app = new Hono<AppContext>()
 
@@ -34,77 +38,18 @@ app.use('/api/*', async (c, next) => {
   await next()
 })
 
-const SESSION_MAX_AGE = 7 * 86_400_000
 const LOOPBACK_HOSTS = ['localhost', '127.0.0.1', '[::1]']
-
-function googleConfigured(env: Env): boolean {
-  const clientId = env.GOOGLE_CLIENT_ID
-  const secret = env.GOOGLE_CLIENT_SECRET
-  const placeholder = (value?: string) => !value || value.startsWith('replace_with')
-  return !placeholder(clientId) && !placeholder(secret)
-}
-
-function cookiesOf(request: Request): Record<string, string> {
-  const header = request.headers.get('cookie') || ''
-  return Object.fromEntries(
-    header.split(';').map((part) => {
-      const [key, ...value] = part.trim().split('=')
-      return [key, decodeURIComponent(value.join('='))]
-    }),
-  )
-}
-
-function isSecureRequest(request: Request): boolean {
-  return new URL(request.url).protocol === 'https:'
-}
-
-async function issueSession(c: any, db: D1Database, sub: string): Promise<boolean> {
-  const secret = sessionSecret(c.env)
-  if (!secret) return false
-  const sessionId = crypto.randomUUID()
-  const expiresAt = Date.now() + SESSION_MAX_AGE
-  const token = await createSessionToken(sessionId, expiresAt, secret)
-  await db
-    .prepare('INSERT INTO acics_sessions (id, user_sub, expires_at, created_at) VALUES (?, ?, ?, ?)')
-    .bind(sessionId, sub, expiresAt, Date.now())
-    .run()
-  const secure = isSecureRequest(c.req.raw) ? '; Secure' : ''
-  c.header('Set-Cookie', `acics_session=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=604800${secure}`)
-  c.header('Set-Cookie', `acics_demo=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0${secure}`, { append: true })
-  return true
-}
-
-function clearSessionCookies(c: any) {
-  const secure = isSecureRequest(c.req.raw) ? '; Secure' : ''
-  c.header('Set-Cookie', `acics_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0${secure}`)
-  c.header('Set-Cookie', `acics_demo=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0${secure}`, { append: true })
-}
-
-function accountSummary(account: NonNullable<Awaited<ReturnType<typeof loadAccount>>>) {
-  return {
-    sub: account.sub,
-    name: account.fullName,
-    email: account.email,
-    roles: account.roles,
-    role: account.primaryRole,
-    accountStatus: account.accountStatus,
-    designation: account.designation,
-    institution: account.institutionId ? { id: account.institutionId, name: account.institutionName } : null,
-    bureau: account.bureauId ? { id: account.bureauId, name: account.bureauName, code: account.bureauCode } : null,
-    demo: account.demo,
-  }
-}
 
 // Public: lets the app know how to sign in before any private call.
 app.get('/api/auth/status', (c) => {
   const mode = authMode(c.env, c.req.raw)
-  const dev = mode === 'development'
+  const dev = mode === 'development' || mode === 'mock'
   c.header('Cache-Control', 'private, no-store')
   return c.json({
     mode,
     database: Boolean(c.env.DB),
     files: Boolean(c.env.FILES),
-    googleConfigured: googleConfigured(c.env),
+    googleConfigured: isGoogleConfigured(c.env),
     devAuthEnabled: dev,
     appEnv: c.env.APP_ENV ?? 'development',
     portals: PORTAL_KEYS.map((key) => ({ key, ...PORTALS[key] })),
@@ -339,8 +284,8 @@ app.get('/api/auth/onboarding/options', async (c) => {
     designations: COMPLAINANT_DESIGNATIONS,
     institutions: institutions.results,
     requestedPortal: 'complainant',
-    googleConfigured: googleConfigured(c.env),
-    devAuthEnabled: authMode(c.env, c.req.raw) === 'development',
+    googleConfigured: isGoogleConfigured(c.env),
+    devAuthEnabled: (m => m === 'development' || m === 'mock')(authMode(c.env, c.req.raw)),
   })
 })
 
@@ -430,7 +375,7 @@ app.post('/api/auth/forgot-password', async (c) => {
 })
 
 app.get('/api/auth/google', (c) => {
-  if (!googleConfigured(c.env)) {
+  if (!isGoogleConfigured(c.env)) {
     c.header('Cache-Control', 'private, no-store')
     return c.json(
       {
@@ -447,69 +392,15 @@ app.get('/api/auth/google', (c) => {
   if (!isPortalKey(portal)) {
     return c.json({ error: 'The requested portal is not recognised.', code: 'PORTAL_UNKNOWN' }, 400)
   }
-  const clientId = c.env.GOOGLE_CLIENT_ID!
-  const callbackUrl = c.env.GOOGLE_CALLBACK_URL || `${new URL(c.req.url).origin}/api/auth/google/callback`
-  const state = crypto.randomUUID()
-  const nonce = crypto.randomUUID()
+  const { url, state, nonce } = googleAuthProvider.buildAuthorizationUrl(c.env, c.req.raw, portal)
   const secure = isSecureRequest(c.req.raw) ? '; Secure' : ''
   c.header('Set-Cookie', `acics_oauth_state=${encodeURIComponent(`${state}.${nonce}.${portal}`)}; Path=/api/auth/google; HttpOnly; SameSite=Lax; Max-Age=600${secure}`)
-
-  const googleAuthUrl = new URL('https://accounts.google.com/o/oauth2/v2/auth')
-  googleAuthUrl.searchParams.set('client_id', clientId)
-  googleAuthUrl.searchParams.set('redirect_uri', callbackUrl)
-  googleAuthUrl.searchParams.set('response_type', 'code')
-  googleAuthUrl.searchParams.set('scope', 'openid email profile')
-  googleAuthUrl.searchParams.set('state', state)
-  googleAuthUrl.searchParams.set('nonce', nonce)
-  googleAuthUrl.searchParams.set('access_type', 'online')
-  googleAuthUrl.searchParams.set('prompt', 'select_account')
-
-  return c.redirect(googleAuthUrl.toString(), 302)
+  return c.redirect(url.toString(), 302)
 })
-
-interface GoogleIdentity {
-  sub: string
-  email: string
-  emailVerified: boolean
-  name: string
-}
-
-async function exchangeGoogleCode(env: Env, code: string, redirectUri: string): Promise<GoogleIdentity | { error: string }> {
-  try {
-    const tokenResponse = await fetch('https://oauth2.googleapis.com/token', {
-      method: 'POST',
-      headers: { 'content-type': 'application/x-www-form-urlencoded' },
-      body: new URLSearchParams({
-        code,
-        client_id: env.GOOGLE_CLIENT_ID!,
-        client_secret: env.GOOGLE_CLIENT_SECRET!,
-        redirect_uri: redirectUri,
-        grant_type: 'authorization_code',
-      }),
-    })
-    if (!tokenResponse.ok) return { error: 'token_exchange_failed' }
-    const tokens = (await tokenResponse.json()) as { id_token?: string }
-    if (!tokens.id_token) return { error: 'missing_id_token' }
-
-    // Google's tokeninfo endpoint validates the ID token signature, issuer,
-    // audience, and expiry against Google's published keys.
-    const infoResponse = await fetch(`https://oauth2.googleapis.com/tokeninfo?id_token=${encodeURIComponent(tokens.id_token)}`)
-    if (!infoResponse.ok) return { error: 'invalid_id_token' }
-    const info = (await infoResponse.json()) as Record<string, string>
-    const emailVerified = info.email_verified === 'true' || (info.email_verified as unknown) === true
-    if (info.aud !== env.GOOGLE_CLIENT_ID) return { error: 'audience_mismatch' }
-    if (info.iss !== 'https://accounts.google.com' && info.iss !== 'accounts.google.com') return { error: 'issuer_mismatch' }
-    if (!info.exp || Number(info.exp) * 1000 <= Date.now()) return { error: 'token_expired' }
-    if (!info.sub || !info.email || !emailVerified) return { error: 'unverified_identity' }
-    return { sub: info.sub, email: info.email.toLowerCase(), emailVerified, name: info.name || info.email.split('@')[0] }
-  } catch {
-    return { error: 'google_unavailable' }
-  }
-}
 
 app.get('/api/auth/google/callback', async (c) => {
   const db = c.env.DB
-  if (!googleConfigured(c.env) || !db) {
+  if (!isGoogleConfigured(c.env) || !db) {
     return c.json({ error: 'google_oauth_not_configured', code: 'GOOGLE_NOT_CONFIGURED', message: 'Google OAuth callback cannot proceed: missing Google credentials.' }, 501)
   }
   await ensureAcics(db, c.env)
@@ -527,7 +418,7 @@ app.get('/api/auth/google/callback', async (c) => {
   }
 
   const callbackUrl = c.env.GOOGLE_CALLBACK_URL || `${new URL(c.req.url).origin}/api/auth/google/callback`
-  const identity = await exchangeGoogleCode(c.env, code, callbackUrl)
+  const identity = await googleAuthProvider.exchangeCode(c.env, code, callbackUrl)
   if ('error' in identity) {
     return c.json({ error: identity.error, message: 'Google sign-in could not be verified. No session was created.' }, 401)
   }
@@ -578,7 +469,7 @@ app.get('/api/auth/google/callback', async (c) => {
 app.post('/api/acics/demo-login', async (c) => {
   if (
     c.env.FREEBUFF_CLIENT_ID ||
-    googleConfigured(c.env) ||
+    isGoogleConfigured(c.env) ||
     (c.env.APP_ENV || '').toLowerCase() === 'production' ||
     !LOOPBACK_HOSTS.includes(new URL(c.req.url).hostname)
   ) {
@@ -598,12 +489,12 @@ app.post('/api/acics/demo-logout', (c) => {
 })
 
 // Development access: a clearly-labelled synthetic session for local UI work.
-// It is gated by the same authMode() switch as the rest of the app, so it can
-// never run in production, behind an identity provider, or on a non-loopback
-// origin. The account is explicitly synthetic (dev- prefix) and holds all four
-// roles so every portal can be explored without an approval workflow.
+// Delegated to MockAuthProvider, which refuses production, identity-provider
+// and non-loopback origins. The synthetic account holds all four roles so every
+// portal can be explored without an approval workflow.
 app.post('/api/auth/dev-session', async (c) => {
-  if (authMode(c.env, c.req.raw) !== 'development') {
+  const mode = authMode(c.env, c.req.raw)
+  if (!mockAuthProvider.isEnabled(c.env, c.req.raw) || (mode !== 'development' && mode !== 'mock')) {
     return c.json(
       {
         error: 'Local development access is disabled on this instance. Use the configured identity provider or run the app on a loopback development origin with APP_ENV=development.',
@@ -622,88 +513,14 @@ app.post('/api/auth/dev-session', async (c) => {
   } catch {
     return c.json({ error: 'A valid JSON request is required.', code: 'DEV_INVALID_PAYLOAD' }, 400)
   }
-
-  const identifier = typeof body.identifier === 'string' ? body.identifier.trim().slice(0, 160) : ''
-  const displayName = typeof body.displayName === 'string' ? body.displayName.trim().slice(0, 120) : ''
-  const portal: PortalKey | null = isPortalKey(body.portal) ? body.portal : null
-
-  if (!identifier) {
-    return c.json({ error: 'Enter a user ID or email address to continue.', code: 'DEV_ID_REQUIRED' }, 400)
-  }
-  if (body.portal !== undefined && body.portal !== null && !portal) {
-    return c.json({ error: 'The requested portal is not recognised.', code: 'PORTAL_UNKNOWN' }, 400)
-  }
-
-  // Deterministic identity per entered ID so re-entering it resumes the same
-  // synthetic account. The hash keeps IDs that normalise identically apart.
-  const slug = identifier
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '')
-    .slice(0, 40)
-  let hash = 0x811c9dc5
-  for (const char of identifier.toLowerCase()) {
-    hash ^= char.codePointAt(0)!
-    hash = Math.imul(hash, 0x01000193) >>> 0
-  }
-  const suffix = hash.toString(16).padStart(8, '0')
-  const sub = `dev-${slug ? `${slug}-` : ''}${suffix}`
-  const name = displayName || identifier
-
-  await db
-    .prepare(`INSERT OR IGNORE INTO acics_bureaus (id,code,name,permitted_categories,created_at) VALUES (?,?,?,?,?)`)
-    .bind('bureau-pgrc', 'PGRC', 'Public Grievance Redressal Cell', '[]', Date.now())
-    .run()
-  const institution = await db.prepare(`SELECT id FROM acics_institutions WHERE active=1 ORDER BY id LIMIT 1`).first<any>()
-
-  // Prefer showing the email the developer typed; fall back to a synthetic
-  // address when it already belongs to another account in this database.
-  let email = identifier.includes('@') ? identifier.toLowerCase() : `${slug || 'dev'}.${suffix}@dev.local`
-  const clash = await db.prepare(`SELECT sub FROM acics_users WHERE lower(email)=?`).bind(email).first<any>()
-  if (clash && clash.sub !== sub) email = `${slug || 'dev'}.${suffix}@dev.local`
-
-  const now = Date.now()
-  await db
-    .prepare(
-      `INSERT INTO acics_users (sub,full_name,email,role,bureau_id,failed_attempts,locked_until,active,account_status,designation,institution_id,created_at,updated_at)
-       VALUES (?,?,?,'ADMIN','bureau-pgrc',0,NULL,1,'ACTIVE','Development Access',?,?,?)
-       ON CONFLICT(sub) DO UPDATE SET full_name=excluded.full_name, email=excluded.email, active=1, account_status='ACTIVE', bureau_id='bureau-pgrc', institution_id=excluded.institution_id, updated_at=excluded.updated_at`,
-    )
-    .bind(sub, name, email, institution?.id ?? null, now, now)
-    .run()
-  for (const role of ['COMPLAINANT', 'OFFICIAL', 'ADMIN', 'BUREAU_OFFICER']) {
-    await db
-      .prepare(`INSERT OR IGNORE INTO acics_user_roles (user_sub,role,granted_by,granted_at) VALUES (?,?,?,?)`)
-      .bind(sub, role, 'development', now)
-      .run()
-  }
-  await db
-    .prepare(`INSERT INTO acics_actions (id,complaint_id,actor_id,action_type,new_value,remarks,visibility,created_at) VALUES (?,?,?,?,?,?,?,?)`)
-    .bind(crypto.randomUUID(), 'SYSTEM', sub, 'DEV_SESSION_ISSUED', portal ?? 'all', `Development session for ${identifier}`, 'INTERNAL', now)
-    .run()
-
-  if (!(await issueSession(c, db, sub))) {
-    return c.json({ error: 'Server session configuration is incomplete. Set SESSION_SECRET.', code: 'SESSION_CONFIG_MISSING' }, 500)
-  }
-
-  const account = await loadAccount(db, sub)
-  const decision = account && portal ? canAccessPortal(account, portal) : null
-  c.header('Cache-Control', 'private, no-store')
-  return c.json({
-    ok: true,
-    development: true,
-    label: 'LOCAL DEVELOPMENT MODE',
-    message: 'Synthetic development session. This is not a verified or production identity.',
-    portal: portal ?? null,
-    access: decision,
-    account: account ? accountSummary(account) : null,
-  })
+  return mockAuthProvider.signIn(c, db, body)
 })
 
 // Development-only seed helper used by `bun run seed`. ensureAcics() only
 // inserts missing rows, so repeated runs never delete or rewrite live records.
 app.post('/api/dev/seed', async (c) => {
-  if (authMode(c.env, c.req.raw) !== 'development') {
+  const mode = authMode(c.env, c.req.raw)
+  if (mode !== 'development' && mode !== 'mock') {
     return c.json(
       { error: 'Development seeding is disabled on this instance.', code: 'DEV_SEED_DISABLED' },
       403,
